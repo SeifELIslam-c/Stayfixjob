@@ -49,5 +49,7 @@
 	<string>Votre position est utilisee pour verifier que vous etes bien dans la zone de travail avant le pointage.</string>
 	<key>NSLocationAlwaysAndWhenInUseUsageDescription</key>
 	<string>Votre position est utilisee pour verifier que vous etes bien dans la zone de travail avant le pointage.</string>
+	<key>ITSAppUsesNonExemptEncryption</key>
+	<false/>
 </dict>
 </plist>
