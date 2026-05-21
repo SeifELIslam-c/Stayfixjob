@@ -1,0 +1,21 @@
+{
+  "name": "stayfix-job-reset-api",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Custom Firebase password reset email API for StayFix Job",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node server.js"
+  },
+  "dependencies": {
+    "cors": "^2.8.5",
+    "dotenv": "^16.6.1",
+    "express": "^4.21.2",
+    "firebase-admin": "^13.5.0",
+    "resend": "^4.8.0"
+  },
+  "devDependencies": {
+    "sharp": "^0.34.5"
+  }
+}
