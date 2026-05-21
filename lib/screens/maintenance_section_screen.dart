@@ -1,5 +1,5 @@
 import 'package:flutter/material.dart';
-import 'package:lucide_icons/lucide_icons.dart';
+import 'package:lucide_icons_flutter/lucide_icons_flutter.dart';
 
 const kMaintenanceBlue = Color(0xFF0F63FF);
 const kMaintenanceDeepBlue = Color(0xFF0047D8);
