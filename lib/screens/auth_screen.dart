@@ -1006,7 +1006,7 @@ class _AuthScreenState extends State<AuthScreen> {
     const bodyColor = Color(0xFF7C8BA8);
 
     return Scaffold(
-      resizeToAvoidBottomInset: false,
+      resizeToAvoidBottomInset: true,
       backgroundColor: const Color(0xFFF1F6FF),
       body: DecoratedBox(
         decoration: const BoxDecoration(
@@ -1027,9 +1027,11 @@ class _AuthScreenState extends State<AuthScreen> {
             final topPadding = ultraCompact ? 6.0 : 10.0;
             final bottomPadding = ultraCompact ? 6.0 : 10.0;
 
-            return SizedBox(
-              height: constraints.maxHeight,
-              child: Column(
+            return SingleChildScrollView(
+              physics: const ClampingScrollPhysics(),
+              child: ConstrainedBox(
+                constraints: BoxConstraints(minHeight: constraints.maxHeight),
+                child: Column(
                 children: [
                   _buildHero(
                     heroHeight: heroHeight,
@@ -1038,31 +1040,30 @@ class _AuthScreenState extends State<AuthScreen> {
                     cardBackground: cardBackground,
                     bridgeHeight: 22,
                   ),
-                  Expanded(
-                    child: Container(
-                      width: double.infinity,
-                      transform: Matrix4.translationValues(0, -18, 0),
-                      decoration: const BoxDecoration(
-                        color: cardBackground,
-                        borderRadius: BorderRadius.vertical(
-                          top: Radius.circular(34),
-                        ),
-                        boxShadow: [
-                          BoxShadow(
-                            color: Color(0x140F63FF),
-                            blurRadius: 28,
-                            offset: Offset(0, -8),
-                          ),
-                        ],
+                  Container(
+                    width: double.infinity,
+                    transform: Matrix4.translationValues(0, -18, 0),
+                    decoration: const BoxDecoration(
+                      color: cardBackground,
+                      borderRadius: BorderRadius.vertical(
+                        top: Radius.circular(34),
                       ),
-                      child: Padding(
-                        padding: EdgeInsets.fromLTRB(
-                          horizontalPadding,
-                          topPadding,
-                          horizontalPadding,
-                          bottomPadding,
+                      boxShadow: [
+                        BoxShadow(
+                          color: Color(0x140F63FF),
+                          blurRadius: 28,
+                          offset: Offset(0, -8),
                         ),
-                        child: Column(
+                      ],
+                    ),
+                    child: Padding(
+                      padding: EdgeInsets.fromLTRB(
+                        horizontalPadding,
+                        topPadding,
+                        horizontalPadding,
+                        bottomPadding + 24,
+                      ),
+                      child: Column(
                           crossAxisAlignment: CrossAxisAlignment.start,
                           children: [
                             Text(
@@ -1344,8 +1345,8 @@ class _AuthScreenState extends State<AuthScreen> {
                         ),
                       ),
                     ),
-                  ),
-                ],
+                  ],
+                ),
               ),
             );
           },
