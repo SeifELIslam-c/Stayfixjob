@@ -11,7 +11,7 @@ class DefaultFirebaseOptions {
       case TargetPlatform.android:
         return android;
       case TargetPlatform.iOS:
-        throw UnsupportedError('iOS configuration not provided');
+        return ios;
       case TargetPlatform.macOS:
         throw UnsupportedError('MacOS configuration not provided');
       case TargetPlatform.windows:
@@ -40,5 +40,15 @@ class DefaultFirebaseOptions {
     messagingSenderId: "1084030875192",
     projectId: "hotel-project-fa6f3",
     storageBucket: "hotel-project-fa6f3.firebasestorage.app",
+  );
+
+  static const FirebaseOptions ios = FirebaseOptions(
+    apiKey: "AIzaSyDNh0gY2vCGnn4oZcqYCh05CrE3wY-7tKI",
+    appId: "1:1084030875192:ios:36b4a148282bb1e15058cd",
+    messagingSenderId: "1084030875192",
+    projectId: "hotel-project-fa6f3",
+    storageBucket: "hotel-project-fa6f3.firebasestorage.app",
+    iosClientId: "1084030875192-1opjb9vohnia6p8r0v2g7t4ourjgs9mo.apps.googleusercontent.com",
+    iosBundleId: "com.rezzaky.stayfixjob",
   );
 }

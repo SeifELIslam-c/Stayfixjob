@@ -12,7 +12,12 @@ void main() async {
   WidgetsFlutterBinding.ensureInitialized();
 
   await AppEnv.load();
-  await Firebase.initializeApp(options: DefaultFirebaseOptions.currentPlatform);
+  try {
+    await Firebase.initializeApp(
+        options: DefaultFirebaseOptions.currentPlatform);
+  } catch (e) {
+    // Firebase already initialized (hot restart) or config error — safe to continue.
+  }
 
   runApp(const MyApp());
 }
