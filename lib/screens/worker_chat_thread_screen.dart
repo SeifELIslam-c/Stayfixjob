@@ -2033,16 +2033,18 @@ class _MessageBubbleState extends State<_MessageBubble> {
                       // Video message
                       if (hasVideo) ...[
                         GestureDetector(
-                          onTap: () {
-                            Navigator.push(
-                              context,
-                              MaterialPageRoute(
-                                builder: (_) => _VideoPlayerPage(
-                                  url: widget.videoUrl!,
-                                ),
-                              ),
-                            );
-                          },
+                          onTap: widget.isSelectMode
+                              ? null
+                              : () {
+                                  Navigator.push(
+                                    context,
+                                    MaterialPageRoute(
+                                      builder: (_) => _VideoPlayerPage(
+                                        url: widget.videoUrl!,
+                                      ),
+                                    ),
+                                  );
+                                },
                           child: Container(
                             width: 200,
                             height: 150,
@@ -2131,8 +2133,8 @@ class _MessageBubbleState extends State<_MessageBubble> {
                                   activeDurationMs: _duration.inMilliseconds > 0
                                       ? _duration.inMilliseconds
                                       : widget.audioDurationMs,
-                                  onTap: _toggleAudio,
-                                  onSeek: _seekAudio,
+                                  onTap: widget.isSelectMode ? null : _toggleAudio,
+                                  onSeek: widget.isSelectMode ? null : _seekAudio,
                                 ),
                               if (hasAudio && hasText)
                                 const SizedBox(height: 8),
@@ -2243,14 +2245,17 @@ class _MessageBubbleState extends State<_MessageBubble> {
             crossAxisAlignment: CrossAxisAlignment.center,
             children: [
               if (!widget.isMine) ...[
-                Padding(
-                  padding: const EdgeInsets.only(left: 4),
-                  child: Icon(
-                    widget.isSelected
-                        ? Icons.check_circle
-                        : Icons.radio_button_unchecked,
-                    color: kMessagesBlue,
-                    size: 20,
+                GestureDetector(
+                  onTap: widget.onSelectToggle,
+                  child: Padding(
+                    padding: const EdgeInsets.only(left: 4),
+                    child: Icon(
+                      widget.isSelected
+                          ? Icons.check_circle
+                          : Icons.radio_button_unchecked,
+                      color: kMessagesBlue,
+                      size: 20,
+                    ),
                   ),
                 ),
                 const SizedBox(width: 4),
@@ -2258,14 +2263,17 @@ class _MessageBubbleState extends State<_MessageBubble> {
               Expanded(child: bubbleContent),
               if (widget.isMine) ...[
                 const SizedBox(width: 4),
-                Padding(
-                  padding: const EdgeInsets.only(right: 4),
-                  child: Icon(
-                    widget.isSelected
-                        ? Icons.check_circle
-                        : Icons.radio_button_unchecked,
-                    color: kMessagesBlue,
-                    size: 20,
+                GestureDetector(
+                  onTap: widget.onSelectToggle,
+                  child: Padding(
+                    padding: const EdgeInsets.only(right: 4),
+                    child: Icon(
+                      widget.isSelected
+                          ? Icons.check_circle
+                          : Icons.radio_button_unchecked,
+                      color: kMessagesBlue,
+                      size: 20,
+                    ),
                   ),
                 ),
               ],
@@ -2429,8 +2437,8 @@ class _AudioBubbleRow extends StatelessWidget {
   final List<int> waveform;
   final int progressMs;
   final int? activeDurationMs;
-  final VoidCallback onTap;
-  final ValueChanged<double> onSeek;
+  final VoidCallback? onTap;
+  final ValueChanged<double>? onSeek;
 
   @override
   Widget build(BuildContext context) {
@@ -2489,11 +2497,13 @@ class _AudioBubbleRow extends StatelessWidget {
             builder: (context, constraints) {
               return GestureDetector(
                 behavior: HitTestBehavior.translucent,
-                onTapDown: (details) {
-                  final width = constraints.maxWidth;
-                  if (width <= 0) return;
-                  onSeek(details.localPosition.dx / width);
-                },
+                onTapDown: onSeek == null
+                    ? null
+                    : (details) {
+                        final width = constraints.maxWidth;
+                        if (width <= 0) return;
+                        onSeek!(details.localPosition.dx / width);
+                      },
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
