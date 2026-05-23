@@ -4143,7 +4143,7 @@ class _ProfileScreenState extends State<ProfileScreen> {
       onTap: null, // routing will be added later
       child: Container(
         width: double.infinity,
-        padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 18),
+        padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 28),
         decoration: BoxDecoration(
           gradient: const LinearGradient(
             colors: [Color(0xFF0F63FF), Color(0xFF1C4FCE)],

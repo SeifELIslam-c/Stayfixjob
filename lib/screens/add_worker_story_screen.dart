@@ -1,6 +1,4 @@
 import 'dart:io';
-import 'dart:ui' as ui;
-
 import 'package:flutter/material.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
@@ -304,129 +302,97 @@ class _AddWorkerStoryScreenState extends State<AddWorkerStoryScreen> {
   // ── State 2: Media preview ────────────────────────────────────────────────
 
   Widget _buildPreviewState() {
-    return Container(
-      color: Colors.black,
-      child: SafeArea(
-        child: Column(
-          children: [
-            _buildTopBar(mediaSelected: true),
-            _buildRightTools(),
-            Expanded(child: _buildMediaWithCaption()),
-            _buildBottomControls(),
-          ],
-        ),
-      ),
-    );
-  }
-
-  Widget _buildMediaWithCaption() {
-    final targetRatio = _isVertical ? (9.0 / 16.0) : (16.0 / 9.0);
-    return Center(
-      child: AspectRatio(
-        aspectRatio: targetRatio,
-        child: ClipRRect(
-          borderRadius: BorderRadius.circular(12),
-          child: Stack(
-            fit: StackFit.expand,
-            children: [
-              // Background layer: blurred fill for landscape, cover for portrait
-              if (_mediaType == 'image')
-                _isVertical
-                    ? Image.file(_selectedMedia!, fit: BoxFit.cover)
-                    : ImageFiltered(
-                        imageFilter: ui.ImageFilter.blur(sigmaX: 22, sigmaY: 22),
-                        child: Image.file(_selectedMedia!, fit: BoxFit.cover),
-                      ),
-              if (_mediaType == 'video' && _videoReady)
-                _isVertical
-                    ? FittedBox(
-                        fit: BoxFit.cover,
-                        child: SizedBox(
-                          width: _videoCtrl!.value.size.width,
-                          height: _videoCtrl!.value.size.height,
-                          child: VideoPlayer(_videoCtrl!),
-                        ),
-                      )
-                    : ImageFiltered(
-                        imageFilter: ui.ImageFilter.blur(sigmaX: 22, sigmaY: 22),
-                        child: FittedBox(
-                          fit: BoxFit.cover,
-                          child: SizedBox(
-                            width: _videoCtrl!.value.size.width,
-                            height: _videoCtrl!.value.size.height,
-                            child: VideoPlayer(_videoCtrl!),
-                          ),
-                        ),
-                      ),
-              // Foreground centered media (landscape only)
-              if (!_isVertical) _buildMediaForeground(),
-              // Caption overlay at the bottom of the media
-              Positioned(
-                bottom: 0,
-                left: 0,
-                right: 0,
-                child: Container(
-                  decoration: const BoxDecoration(
-                    gradient: LinearGradient(
-                      begin: Alignment.bottomCenter,
-                      end: Alignment.topCenter,
-                      colors: [Colors.black87, Colors.transparent],
-                    ),
-                  ),
-                  padding: const EdgeInsets.fromLTRB(12, 32, 12, 12),
-                  child: TextField(
-                    controller: _captionCtrl,
-                    maxLength: 200,
-                    style: const TextStyle(color: Colors.white, fontSize: 14),
-                    decoration: InputDecoration(
-                      hintText: 'Ajouter une légende...',
-                      hintStyle: TextStyle(
-                        color: Colors.white.withValues(alpha: 0.60),
-                        fontSize: 14,
-                      ),
-                      prefixIcon: const Icon(
-                        LucideIcons.pencil,
-                        color: Colors.white60,
-                        size: 16,
-                      ),
-                      border: InputBorder.none,
-                      contentPadding: const EdgeInsets.symmetric(
-                        horizontal: 16,
-                        vertical: 10,
-                      ),
-                      counterStyle: const TextStyle(
-                        color: Colors.white38,
-                        fontSize: 11,
-                      ),
-                    ),
+    return Scaffold(
+      backgroundColor: Colors.black,
+      body: Stack(
+        fit: StackFit.expand,
+        children: [
+          // Full-screen media
+          _buildFullScreenMedia(),
+          // Overlaid controls
+          SafeArea(
+            child: Stack(
+              children: [
+                // Top bar
+                Positioned(
+                  top: 0, left: 0, right: 0,
+                  child: _buildTopBar(mediaSelected: true),
+                ),
+                // Right tools
+                Positioned(
+                  top: 60, right: 12,
+                  child: _buildRightTools(),
+                ),
+                // Caption + bottom controls
+                Positioned(
+                  bottom: 0, left: 0, right: 0,
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      _buildCaptionOverlay(),
+                      _buildBottomControls(),
+                    ],
                   ),
                 ),
-              ),
-            ],
+              ],
+            ),
           ),
-        ),
+        ],
       ),
     );
   }
 
-  Widget _buildMediaForeground() {
-    Widget media;
+  Widget _buildFullScreenMedia() {
     if (_mediaType == 'image') {
-      media = Image.file(_selectedMedia!, fit: BoxFit.contain);
-    } else if (_mediaType == 'video' && _videoReady) {
-      media = FittedBox(
-        fit: BoxFit.contain,
+      return Image.file(
+        _selectedMedia!,
+        fit: _isVertical ? BoxFit.cover : BoxFit.contain,
+        width: double.infinity,
+        height: double.infinity,
+      );
+    }
+    if (_mediaType == 'video') {
+      if (!_videoReady) {
+        return const Center(child: CircularProgressIndicator(color: Colors.white));
+      }
+      return FittedBox(
+        fit: _isVertical ? BoxFit.cover : BoxFit.contain,
         child: SizedBox(
           width: _videoCtrl!.value.size.width,
           height: _videoCtrl!.value.size.height,
           child: VideoPlayer(_videoCtrl!),
         ),
       );
-    } else {
-      return const SizedBox.shrink();
     }
-    return Center(child: media);
+    return const SizedBox.shrink();
   }
+
+  Widget _buildCaptionOverlay() {
+    return Container(
+      decoration: const BoxDecoration(
+        gradient: LinearGradient(
+          begin: Alignment.bottomCenter,
+          end: Alignment.topCenter,
+          colors: [Colors.black87, Colors.transparent],
+        ),
+      ),
+      padding: const EdgeInsets.fromLTRB(12, 32, 12, 8),
+      child: TextField(
+        controller: _captionCtrl,
+        maxLength: 200,
+        style: const TextStyle(color: Colors.white, fontSize: 14),
+        decoration: InputDecoration(
+          hintText: 'Ajouter une légende...',
+          hintStyle: TextStyle(color: Colors.white.withValues(alpha: 0.60), fontSize: 14),
+          prefixIcon: const Icon(LucideIcons.pencil, color: Colors.white60, size: 16),
+          border: InputBorder.none,
+          contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+          counterStyle: const TextStyle(color: Colors.white38, fontSize: 11),
+        ),
+      ),
+    );
+  }
+
 
   // ── Shared UI pieces ──────────────────────────────────────────────────────
 

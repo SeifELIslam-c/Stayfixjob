@@ -23,7 +23,6 @@ import 'package:video_player/video_player.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 const _kThreadBg = Color(0xFFF7FAFF);
-const _kThreadCard = Color(0xFFFDFEFF);
 const _kThreadBorder = Color(0x331D4ED8);
 const _kThreadSurface = Color(0xF2FFFFFF);
 const _kThreadPeerBubble = Color(0xFFF0F6FF);
@@ -298,14 +297,26 @@ class _WorkerChatThreadScreenState extends State<WorkerChatThreadScreen> {
   Future<void> _deleteSelected() async {
     final ids = List<String>.from(_selectedMessageIds);
     setState(() => _selectedMessageIds.clear());
-    for (final id in ids) {
-      try {
-        final doc = await _messagesRef.doc(id).get();
-        final fileIds =
-            (doc.data()?['fileIds'] as List?)?.cast<String>() ?? [];
-        await _deleteMessage(id, fileIds: fileIds);
-      } catch (_) {}
-    }
+    try {
+      // Fetch all docs in parallel
+      final futures = ids.map((id) => _messagesRef.doc(id).get());
+      final docs = await Future.wait(futures);
+      // Batch delete from Firestore
+      final batch = FirebaseFirestore.instance.batch();
+      final allFileIds = <String>[];
+      for (final doc in docs) {
+        if (doc.exists) {
+          batch.delete(doc.reference);
+          final fileIds = (doc.data()?['fileIds'] as List?)?.cast<String>() ?? [];
+          allFileIds.addAll(fileIds);
+        }
+      }
+      await batch.commit();
+      // Delete VPS files after Firestore batch succeeds
+      if (allFileIds.isNotEmpty) {
+        VpsMediaService.deleteFiles(allFileIds).catchError((_) {});
+      }
+    } catch (_) {}
   }
 
   DocumentReference<Map<String, dynamic>> get _conversationRef =>
@@ -513,9 +524,9 @@ class _WorkerChatThreadScreenState extends State<WorkerChatThreadScreen> {
     final text = _controller.text.trim();
     if (text.isEmpty || _isSending) return;
     _controller.clear();
-    setState(() {});
     unawaited(_setTyping(false));
-    await _sendMessage(text: text, lastMessage: text);
+    // Fire and forget — Firestore offline persistence makes it appear instantly
+    unawaited(_sendMessage(text: text, lastMessage: text));
   }
 
   Future<void> _pickAndSendImage(ImageSource source) async {
@@ -568,9 +579,9 @@ class _WorkerChatThreadScreenState extends State<WorkerChatThreadScreen> {
             margin: const EdgeInsets.fromLTRB(14, 0, 14, 12),
             padding: const EdgeInsets.fromLTRB(18, 14, 18, 18),
             decoration: BoxDecoration(
-              color: _kThreadCard,
+              color: Colors.white,
               borderRadius: BorderRadius.circular(28),
-              border: Border.all(color: _kThreadBorder),
+              border: Border.all(color: const Color(0xFFDCE7FA)),
             ),
             child: Column(
               mainAxisSize: MainAxisSize.min,
@@ -848,7 +859,6 @@ class _WorkerChatThreadScreenState extends State<WorkerChatThreadScreen> {
       if (videoFileId != null && videoFileId.isNotEmpty) videoFileId,
     ];
 
-    setState(() => _isSending = true);
     try {
       await _messagesRepository.sendConversationMessage(
         conversationId: widget.conversationId,
@@ -1197,7 +1207,7 @@ class _WorkerChatThreadScreenState extends State<WorkerChatThreadScreen> {
                         backgroundColor: Colors.white,
                         elevation: 0,
                         leading: IconButton(
-                          icon: const Icon(Icons.close),
+                          icon: const Icon(Icons.close, color: Colors.black),
                           onPressed: () =>
                               setState(() => _selectedMessageIds.clear()),
                         ),
@@ -2001,9 +2011,11 @@ class _MessageBubbleState extends State<_MessageBubble> {
         onTap: widget.isSelectMode ? widget.onSelectToggle : null,
         child: Container(
           margin: const EdgeInsets.only(bottom: 12),
-          child: ConstrainedBox(
+          child: IntrinsicWidth(
+            child: ConstrainedBox(
             constraints: BoxConstraints(
-              maxWidth: MediaQuery.of(context).size.width * 0.78,
+              maxWidth: MediaQuery.of(context).size.width * 0.75,
+              minWidth: 0,
             ),
             child: Stack(
               clipBehavior: Clip.none,
@@ -2206,6 +2218,7 @@ class _MessageBubbleState extends State<_MessageBubble> {
                   ),
               ],
             ),
+          ),
           ),
         ),
       ),
@@ -4046,9 +4059,9 @@ class _AttachmentOption extends StatelessWidget {
       child: Container(
         padding: const EdgeInsets.all(14),
         decoration: BoxDecoration(
-          color: const Color(0xFF181818),
+          color: Colors.white,
           borderRadius: BorderRadius.circular(20),
-          border: Border.all(color: _kThreadBorder),
+          border: Border.all(color: const Color(0xFFDCE7FA)),
         ),
         child: Row(
           children: [
@@ -4069,7 +4082,7 @@ class _AttachmentOption extends StatelessWidget {
                   Text(
                     title,
                     style: GoogleFonts.inter(
-                      color: Colors.white,
+                      color: kMessagesText,
                       fontSize: 14,
                       fontWeight: FontWeight.w700,
                     ),
@@ -4078,7 +4091,7 @@ class _AttachmentOption extends StatelessWidget {
                   Text(
                     subtitle,
                     style: GoogleFonts.inter(
-                      color: Colors.white.withValues(alpha: 0.58),
+                      color: kMessagesText.withValues(alpha: 0.55),
                       fontSize: 12,
                       height: 1.35,
                     ),

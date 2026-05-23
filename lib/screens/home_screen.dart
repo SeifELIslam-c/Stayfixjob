@@ -308,34 +308,49 @@ class _HomeScreenState extends State<HomeScreen> {
   Widget _buildOffersCarousel() {
     if (_homeOffers.isEmpty) {
       return Container(
+        width: double.infinity,
+        padding: const EdgeInsets.all(20),
         decoration: BoxDecoration(
           color: Colors.white,
           borderRadius: BorderRadius.circular(24),
           border: Border.all(color: kHomeBorder),
           boxShadow: const [
-            BoxShadow(
-              color: Color(0x140B2A66),
-              blurRadius: 16,
-              offset: Offset(0, 8),
-            ),
+            BoxShadow(color: Color(0x0A0F63FF), blurRadius: 24, offset: Offset(0, 8)),
           ],
         ),
-        child: const Center(
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              Icon(LucideIcons.briefcase, color: kHomeLightBlue, size: 28),
-              SizedBox(height: 8),
-              Text(
-                'Aucune offre disponible',
-                style: TextStyle(
-                  color: kHomeMuted,
-                  fontSize: 13,
-                  fontWeight: FontWeight.w600,
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                Container(
+                  padding: const EdgeInsets.all(8),
+                  decoration: BoxDecoration(
+                    color: const Color(0xFFF0F6FF),
+                    borderRadius: BorderRadius.circular(12),
+                  ),
+                  child: const Icon(LucideIcons.lightbulb, color: kHomeBlue, size: 18),
                 ),
-              ),
-            ],
-          ),
+                const SizedBox(width: 10),
+                const Text(
+                  'Conseil',
+                  style: TextStyle(color: kHomeBlue, fontSize: 13, fontWeight: FontWeight.w700, letterSpacing: 0.3),
+                ),
+              ],
+            ),
+            const SizedBox(height: 14),
+            const Text(
+              "Plus votre compte est ancien, plus vos chances d'être contacté augmentent.",
+              style: TextStyle(color: Color(0xFF13203F), fontSize: 14, fontWeight: FontWeight.w600, height: 1.45),
+            ),
+            const SizedBox(height: 16),
+            _buildSuggestionChip(LucideIcons.star, 'Complétez votre profil à 100%'),
+            const SizedBox(height: 8),
+            _buildSuggestionChip(LucideIcons.clock3, 'Mettez à jour vos disponibilités'),
+            const SizedBox(height: 8),
+            _buildSuggestionChip(LucideIcons.mapPin, 'Activez votre localisation'),
+          ],
         ),
       );
     }
@@ -833,6 +848,29 @@ class _HomeScreenState extends State<HomeScreen> {
           ),
         ],
       ),
+    );
+  }
+
+  Widget _buildSuggestionChip(IconData icon, String text) {
+    return Row(
+      children: [
+        Container(
+          width: 28,
+          height: 28,
+          decoration: BoxDecoration(
+            color: const Color(0xFFF0F6FF),
+            borderRadius: BorderRadius.circular(8),
+          ),
+          child: Icon(icon, size: 14, color: kHomeBlue),
+        ),
+        const SizedBox(width: 10),
+        Expanded(
+          child: Text(
+            text,
+            style: const TextStyle(color: Color(0xFF475569), fontSize: 13, fontWeight: FontWeight.w500),
+          ),
+        ),
+      ],
     );
   }
 
