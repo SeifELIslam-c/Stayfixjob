@@ -3,6 +3,8 @@ import 'dart:io';
 
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/foundation.dart';
+import 'package:http/http.dart' as http;
+import 'package:http_parser/http_parser.dart';
 
 import 'app_env.dart';
 
@@ -70,83 +72,78 @@ class VpsMediaService {
     required String category,
     String? conversationId,
     int? durationMs,
+    void Function(double progress)? onProgress,
   }) async {
-    final boundary = '----stayfix-${DateTime.now().microsecondsSinceEpoch}';
     final uri = Uri.parse('$_configuredBaseUrl/api/media/upload');
     debugPrint('VPS upload start: category=$category uri=$uri');
-    final client = HttpClient();
-    client.connectionTimeout = const Duration(seconds: 20);
-    try {
-      final request = await client.postUrl(uri);
-      request.headers.contentType = ContentType(
-        'multipart',
-        'form-data',
-        parameters: <String, String>{'boundary': boundary},
-      );
-      final authHeaders = await _authHeaders();
-      authHeaders.forEach(request.headers.set);
 
-      void writeField(String name, String value) {
-        request.write('--$boundary\r\n');
-        request.write(
-          'Content-Disposition: form-data; name="$name"\r\n\r\n$value\r\n',
-        );
-      }
+    final user = FirebaseAuth.instance.currentUser;
+    if (user == null) throw StateError('Utilisateur non connecté');
+    final token = await user.getIdToken();
 
-      writeField('category', category);
-      if (conversationId != null && conversationId.trim().isNotEmpty) {
-        writeField('conversationId', conversationId.trim());
-      }
-      if (durationMs != null) {
-        writeField('durationMs', '$durationMs');
-      }
-
-      final fileName = file.uri.pathSegments.isNotEmpty
-          ? file.uri.pathSegments.last
-          : 'upload.bin';
-      final mimeType = _mimeTypeFor(file.path, category: category);
-      final bytes = await file.readAsBytes();
-
-      request.write('--$boundary\r\n');
-      request.write(
-        'Content-Disposition: form-data; name="file"; filename="$fileName"\r\n',
-      );
-      request.write('Content-Type: $mimeType\r\n\r\n');
-      request.add(bytes);
-      request.write('\r\n--$boundary--\r\n');
-
-      final response = await request.close().timeout(
-        const Duration(seconds: 60),
-      );
-      final body = await utf8.decoder
-          .bind(response)
-          .join()
-          .timeout(const Duration(seconds: 60));
-      if (response.statusCode < 200 || response.statusCode >= 300) {
-        debugPrint(
-          'VPS upload failed: status=${response.statusCode} body=$body uri=$uri',
-        );
-        throw HttpException(
-          'VPS upload failed (${response.statusCode})',
-          uri: uri,
-        );
-      }
-
-      final decoded = jsonDecode(body) as Map<String, dynamic>;
-      final media = Map<String, dynamic>.from(
-        decoded['media'] as Map<String, dynamic>? ?? const <String, dynamic>{},
-      );
-      final normalized = VpsUploadedMedia.fromJson(<String, dynamic>{
-        ...media,
-        'url': normalizeMediaUrlSync(media['url'] as String?),
-      });
-      debugPrint(
-        'VPS upload success: fileId=${normalized.fileId} url=${normalized.url}',
-      );
-      return normalized;
-    } finally {
-      client.close(force: true);
+    final request = http.MultipartRequest('POST', uri);
+    request.headers['Authorization'] = 'Bearer $token';
+    request.headers['X-User-Id'] = user.uid;
+    request.fields['category'] = category;
+    if (conversationId != null && conversationId.trim().isNotEmpty) {
+      request.fields['conversationId'] = conversationId.trim();
     }
+    if (durationMs != null) {
+      request.fields['durationMs'] = durationMs.toString();
+    }
+
+    final mimeType = _mimeTypeFor(file.path, category: category);
+    final fileName = file.uri.pathSegments.isNotEmpty
+        ? file.uri.pathSegments.last
+        : 'upload.bin';
+    final fileBytes = await file.readAsBytes();
+
+    request.files.add(
+      http.MultipartFile.fromBytes(
+        'file',
+        fileBytes,
+        filename: fileName,
+        contentType: MediaType.parse(mimeType),
+      ),
+    );
+
+    onProgress?.call(0.1); // started
+
+    final streamedResponse = await request
+        .send()
+        .timeout(const Duration(seconds: 120));
+
+    onProgress?.call(0.8); // sent
+
+    final responseBody = await streamedResponse.stream
+        .bytesToString()
+        .timeout(const Duration(seconds: 60));
+
+    onProgress?.call(1.0); // done
+
+    if (streamedResponse.statusCode < 200 ||
+        streamedResponse.statusCode >= 300) {
+      debugPrint(
+        'VPS upload failed: status=${streamedResponse.statusCode} body=$responseBody uri=$uri',
+      );
+      throw HttpException(
+        'VPS upload failed (${streamedResponse.statusCode})',
+        uri: uri,
+      );
+    }
+
+    final decoded = jsonDecode(responseBody) as Map<String, dynamic>;
+    final media = Map<String, dynamic>.from(
+      decoded['media'] as Map<String, dynamic>? ?? const <String, dynamic>{},
+    );
+    final normalized = VpsUploadedMedia.fromJson(<String, dynamic>{
+      ...media,
+      'url': normalizeMediaUrlSync(media['url'] as String?),
+    });
+    debugPrint(
+      'VPS upload success: fileId=${normalized.fileId} url=${normalized.url}',
+    );
+    return normalized;
   }
 
   static Future<void> deleteFiles(List<String> fileIds) async {

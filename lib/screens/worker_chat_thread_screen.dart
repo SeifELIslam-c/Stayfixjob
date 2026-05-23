@@ -4,6 +4,7 @@ import 'dart:io';
 import 'dart:ui';
 
 import 'package:audioplayers/audioplayers.dart';
+import 'package:camera/camera.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/material.dart';
@@ -17,6 +18,8 @@ import 'package:hotel_lux_profile/widgets/address_picker.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:record/record.dart';
+import 'package:url_launcher/url_launcher.dart';
+import 'package:video_player/video_player.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 const _kThreadBg = Color(0xFFF7FAFF);
@@ -112,6 +115,7 @@ class _WorkerChatThreadScreenState extends State<WorkerChatThreadScreen> {
   late final Stream<QuerySnapshot<Map<String, dynamic>>> _messagesStream;
 
   bool _isSending = false;
+  bool _uploadingMedia = false;
   bool _isRecording = false;
   DateTime? _recordingStartedAt;
   String? _recordingPath;
@@ -131,12 +135,32 @@ class _WorkerChatThreadScreenState extends State<WorkerChatThreadScreen> {
   String? _ephemeralBannerText;
   Timer? _ephemeralBannerTimer;
 
+  // Pagination
+  final List<QueryDocumentSnapshot<Map<String, dynamic>>> _olderMessages = [];
+  bool _loadingMore = false;
+  bool _hasMoreMessages = true;
+  DocumentSnapshot<Map<String, dynamic>>? _oldestStreamDoc;
+  final ScrollController _scrollController = ScrollController();
+
+  // Message selection
+  final Set<String> _selectedMessageIds = {};
+  bool get _isSelectMode => _selectedMessageIds.isNotEmpty;
+
+  // Camera / video
+  CameraController? _cameraController;
+  bool _isRecordingVideo = false;
+  Timer? _recordingVideoTimer;
+  List<CameraDescription> _cameras = [];
+
   @override
   void dispose() {
     _recordingTicker?.cancel();
     _typingTimer?.cancel();
     _amplitudeSub?.cancel();
     _ephemeralBannerTimer?.cancel();
+    _recordingVideoTimer?.cancel();
+    _scrollController.dispose();
+    _cameraController?.dispose();
     _controller.dispose();
     _recorder.dispose();
     super.dispose();
@@ -154,9 +178,133 @@ class _WorkerChatThreadScreenState extends State<WorkerChatThreadScreen> {
         .doc(widget.conversationId)
         .collection('messages')
         .orderBy('createdAt')
+        .limitToLast(50)
         .snapshots();
     if (widget.initialBannerText?.trim().isNotEmpty == true) {
       _showEphemeralBanner(widget.initialBannerText!.trim());
+    }
+    _scrollController.addListener(() {
+      final pos = _scrollController.position;
+      if (pos.pixels >= pos.maxScrollExtent - 200 &&
+          !_loadingMore &&
+          _hasMoreMessages) {
+        _loadMoreMessages();
+      }
+    });
+    unawaited(_initCameras());
+  }
+
+  Future<void> _initCameras() async {
+    try {
+      _cameras = await availableCameras();
+    } catch (_) {}
+  }
+
+  Future<void> _loadMoreMessages() async {
+    if (_loadingMore || !_hasMoreMessages || _oldestStreamDoc == null) return;
+    setState(() => _loadingMore = true);
+    try {
+      final snap = await FirebaseFirestore.instance
+          .collection('conversations')
+          .doc(widget.conversationId)
+          .collection('messages')
+          .orderBy('createdAt')
+          .endBeforeDocument(_oldestStreamDoc!)
+          .limitToLast(30)
+          .get();
+      if (snap.docs.isEmpty) {
+        setState(() => _hasMoreMessages = false);
+      } else {
+        final existingIds = _olderMessages.map((d) => d.id).toSet();
+        final newDocs =
+            snap.docs.where((d) => !existingIds.contains(d.id)).toList();
+        setState(() {
+          _olderMessages.insertAll(0, newDocs);
+          _oldestStreamDoc = snap.docs.first;
+        });
+      }
+    } catch (_) {
+    } finally {
+      setState(() => _loadingMore = false);
+    }
+  }
+
+  Future<void> _startVideoRecording() async {
+    if (_cameras.isEmpty) return;
+    final ctrl = CameraController(
+      _cameras.first,
+      ResolutionPreset.medium,
+      enableAudio: true,
+    );
+    try {
+      await ctrl.initialize();
+      if (!mounted) {
+        await ctrl.dispose();
+        return;
+      }
+      setState(() {
+        _cameraController = ctrl;
+        _isRecordingVideo = true;
+      });
+      await ctrl.startVideoRecording();
+      _recordingVideoTimer =
+          Timer(const Duration(seconds: 15), _stopVideoRecording);
+    } catch (e) {
+      await ctrl.dispose();
+    }
+  }
+
+  Future<void> _stopVideoRecording() async {
+    _recordingVideoTimer?.cancel();
+    final ctrl = _cameraController;
+    if (ctrl == null || !_isRecordingVideo) return;
+    setState(() {
+      _isRecordingVideo = false;
+      _cameraController = null;
+    });
+    try {
+      final xfile = await ctrl.stopVideoRecording();
+      await ctrl.dispose();
+      final file = File(xfile.path);
+      int durationMs = 0;
+      try {
+        final vpc = VideoPlayerController.file(file);
+        await vpc.initialize();
+        durationMs = vpc.value.duration.inMilliseconds;
+        await vpc.dispose();
+      } catch (_) {}
+      setState(() => _uploadingMedia = true);
+      try {
+        final uploaded = await VpsMediaService.uploadFile(
+          file: file,
+          category: 'chat-video',
+          conversationId: widget.conversationId,
+        );
+        await _sendMessage(
+          videoUrl: uploaded.url,
+          videoMimeType: uploaded.mimeType,
+          videoFileId: uploaded.fileId,
+          videoDurationMs: durationMs,
+          lastMessage: '🎥 Vidéo',
+        );
+      } finally {
+        setState(() => _uploadingMedia = false);
+      }
+    } catch (_) {
+      await ctrl.dispose();
+    }
+  }
+
+  Future<void> _deleteSelected() async {
+    final ids = List<String>.from(_selectedMessageIds);
+    setState(() => _selectedMessageIds.clear());
+    for (final id in ids) {
+      try {
+        final doc = await _messagesRef.doc(id).get();
+        final fileIds =
+            (doc.data()?['fileIds'] as List?)?.cast<String>() ?? [];
+        await _deleteMessage(id, fileIds: fileIds);
+      } catch (_) {}
     }
   }
 
@@ -380,23 +528,29 @@ class _WorkerChatThreadScreenState extends State<WorkerChatThreadScreen> {
       );
       if (picked == null) return;
 
-      final uploaded = await VpsMediaService.uploadFile(
-        file: File(picked.path),
-        category: 'chat-image',
-        conversationId: widget.conversationId,
-      );
+      setState(() => _uploadingMedia = true);
+      try {
+        final uploaded = await VpsMediaService.uploadFile(
+          file: File(picked.path),
+          category: 'chat-image',
+          conversationId: widget.conversationId,
+        );
 
-      await _sendMessage(
-        imageUrl: uploaded.url,
-        imageMimeType: uploaded.mimeType,
-        imageFileId: uploaded.fileId,
-        imageName: picked.name,
-        imageSizeBytes: uploaded.sizeBytes,
-        imageWidth: uploaded.width,
-        imageHeight: uploaded.height,
-        lastMessage: 'Photo',
-      );
+        await _sendMessage(
+          imageUrl: uploaded.url,
+          imageMimeType: uploaded.mimeType,
+          imageFileId: uploaded.fileId,
+          imageName: picked.name,
+          imageSizeBytes: uploaded.sizeBytes,
+          imageWidth: uploaded.width,
+          imageHeight: uploaded.height,
+          lastMessage: 'Photo',
+        );
+      } finally {
+        setState(() => _uploadingMedia = false);
+      }
     } catch (_) {
+      setState(() => _uploadingMedia = false);
       _showSnack('Impossible d envoyer cette photo pour le moment.');
     }
   }
@@ -676,6 +830,10 @@ class _WorkerChatThreadScreenState extends State<WorkerChatThreadScreen> {
     int? audioDurationMs,
     int? audioSizeBytes,
     List<int>? audioWaveform,
+    String? videoUrl,
+    String? videoMimeType,
+    String? videoFileId,
+    int? videoDurationMs,
     String? address,
     double? latitude,
     double? longitude,
@@ -687,6 +845,7 @@ class _WorkerChatThreadScreenState extends State<WorkerChatThreadScreen> {
     final fileIds = <String>[
       if (imageFileId != null && imageFileId.isNotEmpty) imageFileId,
       if (audioFileId != null && audioFileId.isNotEmpty) audioFileId,
+      if (videoFileId != null && videoFileId.isNotEmpty) videoFileId,
     ];
 
     setState(() => _isSending = true);
@@ -694,7 +853,9 @@ class _WorkerChatThreadScreenState extends State<WorkerChatThreadScreen> {
       await _messagesRepository.sendConversationMessage(
         conversationId: widget.conversationId,
         messageData: {
-          'type': audioUrl != null
+          'type': videoUrl != null
+              ? 'video'
+              : audioUrl != null
               ? 'audio'
               : imageUrl != null
               ? 'image'
@@ -715,6 +876,10 @@ class _WorkerChatThreadScreenState extends State<WorkerChatThreadScreen> {
           'audioDurationMs': audioDurationMs,
           'audioSizeBytes': audioSizeBytes,
           'audioWaveform': audioWaveform,
+          'videoUrl': videoUrl,
+          'videoMimeType': videoMimeType,
+          'videoFileId': videoFileId,
+          'videoDurationMs': videoDurationMs,
           'address': address,
           'latitude': latitude,
           'longitude': longitude,
@@ -739,6 +904,72 @@ class _WorkerChatThreadScreenState extends State<WorkerChatThreadScreen> {
         backgroundColor: const Color(0xFF1A1A1A),
       ),
     );
+  }
+
+  Widget _buildMessageBubble({
+    required QueryDocumentSnapshot<Map<String, dynamic>> doc,
+    required String uid,
+  }) {
+    final data = doc.data();
+    final isMine = data['senderId'] == uid;
+    final isSelected = _selectedMessageIds.contains(doc.id);
+    final bubble = _MessageBubble(
+      key: ValueKey(doc.id),
+      senderName: widget.title,
+      messageId: doc.id,
+      conversationId: widget.conversationId,
+      isMine: isMine,
+      text: (data['text'] as String?)?.trim() ?? '',
+      imageUrl: VpsMediaService.normalizeMediaUrlSync(
+        (data['imageUrl'] as String?)?.trim(),
+      ),
+      imageBase64: (data['imageBase64'] as String?)?.trim(),
+      audioUrl: VpsMediaService.normalizeMediaUrlSync(
+        (data['audioUrl'] as String?)?.trim(),
+      ),
+      audioDurationMs: (data['audioDurationMs'] as num?)?.toInt(),
+      audioWaveform:
+          ((data['audioWaveform'] as List?) ?? const [])
+              .map((e) => (e as num).toInt())
+              .toList(),
+      videoUrl: VpsMediaService.normalizeMediaUrlSync(
+        (data['videoUrl'] as String?)?.trim(),
+      ),
+      videoDurationMs: (data['videoDurationMs'] as num?)?.toInt(),
+      address: (data['address'] as String?)?.trim(),
+      latitude: (data['latitude'] as num?)?.toDouble(),
+      longitude: (data['longitude'] as num?)?.toDouble(),
+      fileIds:
+          ((data['fileIds'] as List?) ?? const [])
+              .map((e) => '$e')
+              .toList(),
+      deliveredTo:
+          ((data['deliveredTo'] as List?) ?? const [])
+              .map((e) => '$e')
+              .toList(),
+      seenBy:
+          ((data['seenBy'] as List?) ?? const [])
+              .map((e) => '$e')
+              .toList(),
+      reaction: (data['reaction'] as String?)?.trim(),
+      reactionByUserId: (data['reactionByUserId'] as String?)?.trim(),
+      createdAt: (data['createdAt'] as Timestamp?)?.toDate(),
+      isSelected: isSelected,
+      isSelectMode: _isSelectMode,
+      onDelete: (fileIds) => _deleteMessage(doc.id, fileIds: fileIds),
+      onReact: (reaction) => _reactToMessage(doc.id, reaction),
+      onLongPress: () => setState(
+        () => _selectedMessageIds.add(doc.id),
+      ),
+      onSelectToggle: () => setState(() {
+        if (_selectedMessageIds.contains(doc.id)) {
+          _selectedMessageIds.remove(doc.id);
+        } else {
+          _selectedMessageIds.add(doc.id);
+        }
+      }),
+    );
+    return bubble;
   }
 
   @override
@@ -794,18 +1025,40 @@ class _WorkerChatThreadScreenState extends State<WorkerChatThreadScreen> {
                     StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
                       stream: _messagesStream,
                       builder: (context, snapshot) {
-                        final docs = snapshot.data?.docs ?? const [];
-                        unawaited(_markIncomingMessagesSeen(docs, user.uid));
-                        if (docs.isNotEmpty) {
-                          final latest = docs.last;
+                        final streamDocs = snapshot.data?.docs ?? const [];
+                        unawaited(
+                          _markIncomingMessagesSeen(streamDocs, user.uid),
+                        );
+                        if (streamDocs.isNotEmpty) {
+                          final latest = streamDocs.last;
                           final latestData = latest.data();
                           if (latestData['senderId'] != user.uid &&
                               _lastIncomingMessageId != latest.id) {
                             _lastIncomingMessageId = latest.id;
                             SystemSound.play(SystemSoundType.click);
                           }
+                          // Pagination: track oldest doc in stream
+                          if (_oldestStreamDoc == null) {
+                            WidgetsBinding.instance.addPostFrameCallback((_) {
+                              if (mounted && _oldestStreamDoc == null) {
+                                setState(
+                                  () => _oldestStreamDoc = streamDocs.first,
+                                );
+                              }
+                            });
+                          }
                         }
-                        if (docs.isEmpty) {
+
+                        // Merge older paginated docs with live stream docs
+                        final seenIds = <String>{};
+                        final allDocs = <QueryDocumentSnapshot<
+                          Map<String, dynamic>
+                        >>[];
+                        for (final d in [..._olderMessages, ...streamDocs]) {
+                          if (seenIds.add(d.id)) allDocs.add(d);
+                        }
+
+                        if (allDocs.isEmpty && !_uploadingMedia) {
                           return Center(
                             child: Padding(
                               padding: const EdgeInsets.symmetric(
@@ -849,64 +1102,85 @@ class _WorkerChatThreadScreenState extends State<WorkerChatThreadScreen> {
                           );
                         }
 
+                        // Item count: messages + optional uploading indicator
+                        // + optional load-more spinner at top (last index in
+                        // reversed list)
+                        final uploadingExtra = _uploadingMedia ? 1 : 0;
+                        final loadMoreExtra = _loadingMore ? 1 : 0;
+                        final totalCount =
+                            allDocs.length + uploadingExtra + loadMoreExtra;
+
                         return ListView.builder(
+                          controller: _scrollController,
                           reverse: true,
                           padding: EdgeInsets.fromLTRB(
                             16,
-                            bannerVisible ? 150 : 110,
+                            bannerVisible ? 190 : 150,
                             16,
                             118,
                           ),
-                          itemCount: docs.length,
+                          itemCount: totalCount,
                           itemBuilder: (context, index) {
-                            final doc = docs[docs.length - 1 - index];
-                            final data = doc.data();
-                            final isMine = data['senderId'] == user.uid;
-                            return _MessageBubble(
-                              key: ValueKey(doc.id),
-                              senderName: widget.title,
-                              messageId: doc.id,
-                              conversationId: widget.conversationId,
-                              isMine: isMine,
-                              text: (data['text'] as String?)?.trim() ?? '',
-                              imageUrl: VpsMediaService.normalizeMediaUrlSync(
-                                (data['imageUrl'] as String?)?.trim(),
-                              ),
-                              imageBase64: (data['imageBase64'] as String?)
-                                  ?.trim(),
-                              audioUrl: VpsMediaService.normalizeMediaUrlSync(
-                                (data['audioUrl'] as String?)?.trim(),
-                              ),
-                              audioDurationMs: (data['audioDurationMs'] as num?)
-                                  ?.toInt(),
-                              audioWaveform:
-                                  ((data['audioWaveform'] as List?) ?? const [])
-                                      .map((e) => (e as num).toInt())
-                                      .toList(),
-                              address: (data['address'] as String?)?.trim(),
-                              latitude: (data['latitude'] as num?)?.toDouble(),
-                              longitude: (data['longitude'] as num?)
-                                  ?.toDouble(),
-                              fileIds: ((data['fileIds'] as List?) ?? const [])
-                                  .map((e) => '$e')
-                                  .toList(),
-                              deliveredTo:
-                                  ((data['deliveredTo'] as List?) ?? const [])
-                                      .map((e) => '$e')
-                                      .toList(),
-                              seenBy: ((data['seenBy'] as List?) ?? const [])
-                                  .map((e) => '$e')
-                                  .toList(),
-                              reaction: (data['reaction'] as String?)?.trim(),
-                              reactionByUserId:
-                                  (data['reactionByUserId'] as String?)?.trim(),
-                              createdAt: (data['createdAt'] as Timestamp?)
-                                  ?.toDate(),
-                              onDelete: (fileIds) =>
-                                  _deleteMessage(doc.id, fileIds: fileIds),
-                              onReact: (reaction) =>
-                                  _reactToMessage(doc.id, reaction),
-                            );
+                            // index 0 = bottom of list (most recent)
+                            // Uploading indicator at index 0 (above composer)
+                            if (_uploadingMedia && index == 0) {
+                              return Align(
+                                alignment: Alignment.centerRight,
+                                child: Container(
+                                  margin: const EdgeInsets.only(bottom: 12),
+                                  height: 36,
+                                  padding: const EdgeInsets.symmetric(
+                                    horizontal: 14,
+                                  ),
+                                  decoration: BoxDecoration(
+                                    color: Colors.grey.shade200,
+                                    borderRadius: BorderRadius.circular(18),
+                                  ),
+                                  child: Row(
+                                    mainAxisSize: MainAxisSize.min,
+                                    children: [
+                                      Text(
+                                        'Envoi...',
+                                        style: TextStyle(
+                                          color: Colors.grey,
+                                          fontSize: 13,
+                                        ),
+                                      ),
+                                      const SizedBox(width: 8),
+                                      SizedBox(
+                                        width: 14,
+                                        height: 14,
+                                        child: CircularProgressIndicator(
+                                          strokeWidth: 2,
+                                          color: kMessagesBlue,
+                                        ),
+                                      ),
+                                    ],
+                                  ),
+                                ),
+                              );
+                            }
+
+                            // Adjust index for uploading offset
+                            final adjustedIndex = index - uploadingExtra;
+
+                            // Load-more spinner at the last index (top of list)
+                            if (_loadingMore &&
+                                adjustedIndex == allDocs.length) {
+                              return Center(
+                                child: Padding(
+                                  padding: const EdgeInsets.all(12),
+                                  child: CircularProgressIndicator(
+                                    color: kMessagesBlue,
+                                    strokeWidth: 2,
+                                  ),
+                                ),
+                              );
+                            }
+
+                            final doc =
+                                allDocs[allDocs.length - 1 - adjustedIndex];
+                            return _buildMessageBubble(doc: doc, uid: user.uid);
                           },
                         );
                       },
@@ -918,16 +1192,43 @@ class _WorkerChatThreadScreenState extends State<WorkerChatThreadScreen> {
                 top: 0,
                 left: 0,
                 right: 0,
-                child: _ThreadHeader(
-                  title: widget.title,
-                  subtitle: isOtherTyping
-                      ? 'En train d\'ecrire...'
-                      : widget.subtitle,
-                  avatarBase64: widget.avatarBase64,
-                  avatarUrl: widget.avatarUrl,
-                  isAvailable: widget.isAvailable,
-                  onMenuTap: _showChatOptionsSheet,
-                ),
+                child: _isSelectMode
+                    ? AppBar(
+                        backgroundColor: Colors.white,
+                        elevation: 0,
+                        leading: IconButton(
+                          icon: const Icon(Icons.close),
+                          onPressed: () =>
+                              setState(() => _selectedMessageIds.clear()),
+                        ),
+                        title: Text(
+                          '${_selectedMessageIds.length} sélectionné(s)',
+                          style: const TextStyle(
+                            color: kMessagesText,
+                            fontSize: 16,
+                            fontWeight: FontWeight.w600,
+                          ),
+                        ),
+                        actions: [
+                          IconButton(
+                            icon: const Icon(
+                              Icons.delete_outline,
+                              color: Color(0xFFEF4444),
+                            ),
+                            onPressed: _deleteSelected,
+                          ),
+                        ],
+                      )
+                    : _ThreadHeader(
+                        title: widget.title,
+                        subtitle: isOtherTyping
+                            ? 'En train d\'ecrire...'
+                            : widget.subtitle,
+                        avatarBase64: widget.avatarBase64,
+                        avatarUrl: widget.avatarUrl,
+                        isAvailable: widget.isAvailable,
+                        onMenuTap: _showChatOptionsSheet,
+                      ),
               ),
               Positioned(
                 top: topInset + 72,
@@ -970,6 +1271,8 @@ class _WorkerChatThreadScreenState extends State<WorkerChatThreadScreen> {
                   onChanged: _handleComposerChanged,
                   onAttachTap: _openAttachmentPicker,
                   onCameraTap: () => _pickAndSendImage(ImageSource.camera),
+                  onCameraLongPress: _startVideoRecording,
+                  onCameraLongPressEnd: (_) => _stopVideoRecording(),
                   onSendTap: _sendText,
                   onMicTap: _toggleRecording,
                   onMicPressStart: () =>
@@ -1006,6 +1309,77 @@ class _WorkerChatThreadScreenState extends State<WorkerChatThreadScreen> {
                   onRecordSend: _stopAndSendRecording,
                 ),
               ),
+              // Camera video recording overlay
+              if (_isRecordingVideo && _cameraController != null)
+                Positioned.fill(
+                  child: Stack(
+                    children: [
+                      CameraPreview(_cameraController!),
+                      Container(color: Colors.black26),
+                      Positioned(
+                        bottom: 80,
+                        left: 0,
+                        right: 0,
+                        child: Column(
+                          children: [
+                            TweenAnimationBuilder<double>(
+                              tween: Tween(begin: 0, end: 1),
+                              duration: const Duration(seconds: 15),
+                              builder: (context2, v, child2) => SizedBox(
+                                width: 80,
+                                height: 80,
+                                child: CircularProgressIndicator(
+                                  value: v,
+                                  color: const Color(0xFFFF3B30),
+                                  strokeWidth: 6,
+                                  backgroundColor: Colors.white24,
+                                ),
+                              ),
+                            ),
+                            const SizedBox(height: 12),
+                            const Text(
+                              'Relâchez pour envoyer',
+                              style: TextStyle(
+                                color: Colors.white,
+                                fontSize: 14,
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                      Positioned(
+                        top: 50,
+                        right: 20,
+                        child: GestureDetector(
+                          onTap: () async {
+                            _recordingVideoTimer?.cancel();
+                            final ctrl = _cameraController;
+                            setState(() {
+                              _isRecordingVideo = false;
+                              _cameraController = null;
+                            });
+                            try {
+                              await ctrl?.stopVideoRecording();
+                            } catch (_) {}
+                            await ctrl?.dispose();
+                          },
+                          child: Container(
+                            padding: const EdgeInsets.all(8),
+                            decoration: const BoxDecoration(
+                              color: Colors.black45,
+                              shape: BoxShape.circle,
+                            ),
+                            child: const Icon(
+                              Icons.close,
+                              color: Colors.white,
+                              size: 22,
+                            ),
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
             ],
           );
         },
@@ -1320,6 +1694,8 @@ class _MessageBubble extends StatefulWidget {
     required this.audioUrl,
     required this.audioDurationMs,
     required this.audioWaveform,
+    required this.videoUrl,
+    required this.videoDurationMs,
     required this.address,
     required this.latitude,
     required this.longitude,
@@ -1329,8 +1705,12 @@ class _MessageBubble extends StatefulWidget {
     required this.reaction,
     required this.reactionByUserId,
     required this.createdAt,
+    required this.isSelected,
+    required this.isSelectMode,
     required this.onDelete,
     required this.onReact,
+    required this.onLongPress,
+    required this.onSelectToggle,
   });
 
   final String senderName;
@@ -1343,6 +1723,8 @@ class _MessageBubble extends StatefulWidget {
   final String? audioUrl;
   final int? audioDurationMs;
   final List<int> audioWaveform;
+  final String? videoUrl;
+  final int? videoDurationMs;
   final String? address;
   final double? latitude;
   final double? longitude;
@@ -1352,8 +1734,12 @@ class _MessageBubble extends StatefulWidget {
   final String? reaction;
   final String? reactionByUserId;
   final DateTime? createdAt;
+  final bool isSelected;
+  final bool isSelectMode;
   final Future<void> Function(List<String> fileIds) onDelete;
   final Future<void> Function(String reaction) onReact;
+  final VoidCallback onLongPress;
+  final VoidCallback onSelectToggle;
 
   @override
   State<_MessageBubble> createState() => _MessageBubbleState();
@@ -1568,6 +1954,14 @@ class _MessageBubbleState extends State<_MessageBubble> {
     }
   }
 
+  static String _formatVideoDuration(int ms) {
+    if (ms <= 0) return '0:00';
+    final totalSeconds = (ms / 1000).round();
+    final minutes = totalSeconds ~/ 60;
+    final seconds = (totalSeconds % 60).toString().padLeft(2, '0');
+    return '$minutes:$seconds';
+  }
+
   @override
   Widget build(BuildContext context) {
     Uint8List? imageBytes;
@@ -1582,21 +1976,29 @@ class _MessageBubbleState extends State<_MessageBubble> {
     final hasText = widget.text.isNotEmpty;
     final hasAddress = widget.address != null && widget.address!.isNotEmpty;
     final hasAudio = widget.audioUrl != null && widget.audioUrl!.isNotEmpty;
+    final hasVideo = widget.videoUrl != null && widget.videoUrl!.isNotEmpty;
     final hasImage =
         (widget.imageUrl != null && widget.imageUrl!.isNotEmpty) ||
         imageBytes != null;
     final imageOnly = hasImage && !hasText && !hasAudio && !hasAddress;
+    final videoOnly = hasVideo && !hasText && !hasAudio && !hasAddress;
     final bubbleColor = imageOnly ? Colors.transparent : background;
     final isSeenByOther = widget.seenBy.length > 1;
     final isDeliveredToOther = widget.deliveredTo.length > 1;
 
     final reaction = widget.reaction;
 
-    return Align(
+    Widget bubbleContent = Align(
       alignment: widget.isMine ? Alignment.centerRight : Alignment.centerLeft,
       child: GestureDetector(
-        onDoubleTap: _handleQuickReaction,
-        onLongPressStart: _showReactionTray,
+        onDoubleTap: widget.isSelectMode ? null : _handleQuickReaction,
+        onLongPressStart: widget.isSelectMode
+            ? null
+            : (details) {
+                widget.onLongPress();
+                _showReactionTray(details);
+              },
+        onTap: widget.isSelectMode ? widget.onSelectToggle : null,
         child: Container(
           margin: const EdgeInsets.only(bottom: 12),
           child: ConstrainedBox(
@@ -1616,7 +2018,66 @@ class _MessageBubbleState extends State<_MessageBubble> {
                         ? CrossAxisAlignment.end
                         : CrossAxisAlignment.start,
                     children: [
-                      if (hasImage) ...[
+                      // Video message
+                      if (hasVideo) ...[
+                        GestureDetector(
+                          onTap: () {
+                            Navigator.push(
+                              context,
+                              MaterialPageRoute(
+                                builder: (_) => _VideoPlayerPage(
+                                  url: widget.videoUrl!,
+                                ),
+                              ),
+                            );
+                          },
+                          child: Container(
+                            width: 200,
+                            height: 150,
+                            decoration: BoxDecoration(
+                              color: Colors.black,
+                              borderRadius: BorderRadius.circular(16),
+                            ),
+                            child: Stack(
+                              alignment: Alignment.center,
+                              children: [
+                                ClipRRect(
+                                  borderRadius: BorderRadius.circular(16),
+                                  child: Container(
+                                    color: const Color(0xFF1A1A2E),
+                                  ),
+                                ),
+                                const Icon(
+                                  Icons.play_circle_fill,
+                                  color: Colors.white,
+                                  size: 48,
+                                ),
+                                Positioned(
+                                  bottom: 8,
+                                  right: 8,
+                                  child: Text(
+                                    _formatVideoDuration(
+                                      widget.videoDurationMs ?? 0,
+                                    ),
+                                    style: const TextStyle(
+                                      color: Colors.white,
+                                      fontSize: 11,
+                                    ),
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
+                        ),
+                        if (videoOnly)
+                          _MessageStatusOverlay(
+                            isMine: widget.isMine,
+                            createdAt: widget.createdAt,
+                            isSeenByOther: isSeenByOther,
+                            isDeliveredToOther: isDeliveredToOther,
+                          ),
+                      ],
+                      if (hasImage && !hasVideo) ...[
                         _MessageImage(
                           imageUrl: widget.imageUrl,
                           imageBytes: imageBytes,
@@ -1627,7 +2088,7 @@ class _MessageBubbleState extends State<_MessageBubble> {
                         if (hasText || hasAudio || hasAddress)
                           const SizedBox(height: 6),
                       ],
-                      if (hasText || hasAudio || hasAddress)
+                      if (!hasVideo && (hasText || hasAudio || hasAddress))
                         _BubbleShell(
                           isMine: widget.isMine,
                           color: bubbleColor,
@@ -1749,6 +2210,59 @@ class _MessageBubbleState extends State<_MessageBubble> {
         ),
       ),
     );
+
+    // Selection overlay
+    if (widget.isSelectMode) {
+      return Stack(
+        children: [
+          if (widget.isSelected)
+            Positioned.fill(
+              child: Container(
+                decoration: BoxDecoration(
+                  color: kMessagesBlue.withValues(alpha: 0.08),
+                  border: const Border(
+                    left: BorderSide(color: kMessagesBlue, width: 3),
+                  ),
+                ),
+              ),
+            ),
+          Row(
+            crossAxisAlignment: CrossAxisAlignment.center,
+            children: [
+              if (!widget.isMine) ...[
+                Padding(
+                  padding: const EdgeInsets.only(left: 4),
+                  child: Icon(
+                    widget.isSelected
+                        ? Icons.check_circle
+                        : Icons.radio_button_unchecked,
+                    color: kMessagesBlue,
+                    size: 20,
+                  ),
+                ),
+                const SizedBox(width: 4),
+              ],
+              Expanded(child: bubbleContent),
+              if (widget.isMine) ...[
+                const SizedBox(width: 4),
+                Padding(
+                  padding: const EdgeInsets.only(right: 4),
+                  child: Icon(
+                    widget.isSelected
+                        ? Icons.check_circle
+                        : Icons.radio_button_unchecked,
+                    color: kMessagesBlue,
+                    size: 20,
+                  ),
+                ),
+              ],
+            ],
+          ),
+        ],
+      );
+    }
+
+    return bubbleContent;
   }
 
   Future<void> _openImagePreview(Uint8List? imageBytes) async {
@@ -1793,7 +2307,7 @@ class _AddressCard extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return Row(
+    final card = Row(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         Container(
@@ -1843,12 +2357,40 @@ class _AddressCard extends StatelessWidget {
                     fontWeight: FontWeight.w500,
                   ),
                 ),
+                const SizedBox(height: 6),
+                Row(
+                  children: [
+                    Icon(LucideIcons.externalLink, size: 12, color: kMessagesBlue),
+                    const SizedBox(width: 4),
+                    Text(
+                      'Ouvrir dans Maps',
+                      style: TextStyle(
+                        color: kMessagesBlue,
+                        fontSize: 11.5,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                  ],
+                ),
               ],
             ],
           ),
         ),
       ],
     );
+
+    if (widget.latitude != null && widget.longitude != null) {
+      return GestureDetector(
+        onTap: () async {
+          final uri = Uri.parse(
+            'https://maps.google.com/?q=${widget.latitude},${widget.longitude}',
+          );
+          await launchUrl(uri, mode: LaunchMode.externalApplication);
+        },
+        child: card,
+      );
+    }
+    return card;
   }
 }
 
@@ -2424,7 +2966,7 @@ class _ImagePreviewScreenState extends State<_ImagePreviewScreen>
   }
 }
 
-class _ThreadComposer extends StatelessWidget {
+class _ThreadComposer extends StatefulWidget {
   const _ThreadComposer({
     required this.controller,
     required this.isSending,
@@ -2439,6 +2981,8 @@ class _ThreadComposer extends StatelessWidget {
     required this.onChanged,
     required this.onAttachTap,
     required this.onCameraTap,
+    required this.onCameraLongPress,
+    required this.onCameraLongPressEnd,
     required this.onSendTap,
     required this.onMicTap,
     required this.onMicPressStart,
@@ -2462,6 +3006,8 @@ class _ThreadComposer extends StatelessWidget {
   final VoidCallback onChanged;
   final VoidCallback onAttachTap;
   final VoidCallback onCameraTap;
+  final VoidCallback onCameraLongPress;
+  final void Function(LongPressEndDetails) onCameraLongPressEnd;
   final VoidCallback onSendTap;
   final VoidCallback onMicTap;
   final VoidCallback onMicPressStart;
@@ -2472,11 +3018,46 @@ class _ThreadComposer extends StatelessWidget {
   final VoidCallback onRecordSend;
 
   @override
+  State<_ThreadComposer> createState() => _ThreadComposerState();
+}
+
+class _ThreadComposerState extends State<_ThreadComposer> {
+  final FocusNode _focusNode = FocusNode();
+  bool _isComposerActive = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _focusNode.addListener(_onFocusChange);
+  }
+
+  void _onFocusChange() {
+    if (!_focusNode.hasFocus && _isComposerActive) {
+      Future.delayed(const Duration(milliseconds: 150), () {
+        if (mounted && _isComposerActive) _focusNode.requestFocus();
+      });
+    }
+  }
+
+  @override
+  void dispose() {
+    _focusNode.removeListener(_onFocusChange);
+    _focusNode.dispose();
+    super.dispose();
+  }
+
+  static String _formatDuration(Duration duration) {
+    final minutes = duration.inMinutes.toString();
+    final seconds = (duration.inSeconds % 60).toString().padLeft(2, '0');
+    return '$minutes:$seconds';
+  }
+
+  @override
   Widget build(BuildContext context) {
-    final hasText = controller.text.trim().isNotEmpty;
-    final recordBars = recordingWaveform.isEmpty
+    final hasText = widget.controller.text.trim().isNotEmpty;
+    final recordBars = widget.recordingWaveform.isEmpty
         ? List<int>.filled(26, 10)
-        : recordingWaveform;
+        : widget.recordingWaveform;
 
     final bottomInset = MediaQuery.of(context).viewPadding.bottom;
     return Padding(
@@ -2484,7 +3065,7 @@ class _ThreadComposer extends StatelessWidget {
       child: Stack(
         clipBehavior: Clip.none,
         children: [
-          if (isRecording && !isRecordLocked)
+          if (widget.isRecording && !widget.isRecordLocked)
             Positioned(
               right: 8,
               bottom: 72,
@@ -2501,8 +3082,10 @@ class _ThreadComposer extends StatelessWidget {
                 child: Column(
                   children: [
                     Icon(
-                      holdDy < -80 ? LucideIcons.lock : LucideIcons.unlock,
-                      color: holdDy < -80 ? _kAccent : kMessagesText,
+                      widget.holdDy < -80
+                          ? LucideIcons.lock
+                          : LucideIcons.unlock,
+                      color: widget.holdDy < -80 ? _kAccent : kMessagesText,
                       size: 16,
                     ),
                     const SizedBox(height: 4),
@@ -2524,7 +3107,7 @@ class _ThreadComposer extends StatelessWidget {
               Expanded(
                 child: AnimatedSwitcher(
                   duration: const Duration(milliseconds: 220),
-                  child: showRecordComposer
+                  child: widget.showRecordComposer
                       ? Container(
                           key: const ValueKey('recording'),
                           padding: const EdgeInsets.symmetric(
@@ -2539,7 +3122,7 @@ class _ThreadComposer extends StatelessWidget {
                           child: Row(
                             children: [
                               GestureDetector(
-                                onTap: onRecordDelete,
+                                onTap: widget.onRecordDelete,
                                 child: Icon(
                                   LucideIcons.trash2,
                                   color: kMessagesText.withValues(alpha: 0.78),
@@ -2547,12 +3130,12 @@ class _ThreadComposer extends StatelessWidget {
                                 ),
                               ),
                               const SizedBox(width: 12),
-                              if (!isRecordLocked) ...[
+                              if (!widget.isRecordLocked) ...[
                                 Expanded(
                                   child: Text(
-                                    holdDx < -60
+                                    widget.holdDx < -60
                                         ? 'Relachez pour annuler'
-                                        : holdDy < -50
+                                        : widget.holdDy < -50
                                         ? 'Verrouillage en cours...'
                                         : '<  Slide to cancel',
                                     style: GoogleFonts.inter(
@@ -2566,9 +3149,9 @@ class _ThreadComposer extends StatelessWidget {
                                 ),
                               ] else ...[
                                 GestureDetector(
-                                  onTap: onRecordPauseResume,
+                                  onTap: widget.onRecordPauseResume,
                                   child: Icon(
-                                    isRecordPaused
+                                    widget.isRecordPaused
                                         ? LucideIcons.mic
                                         : LucideIcons.pause,
                                     color: const Color(0xFFFF6678),
@@ -2619,7 +3202,9 @@ class _ThreadComposer extends StatelessWidget {
                                       ),
                                       const SizedBox(height: 4),
                                       Text(
-                                        _formatDuration(recordingElapsed),
+                                        _formatDuration(
+                                          widget.recordingElapsed,
+                                        ),
                                         style: GoogleFonts.inter(
                                           color: kMessagesText.withValues(
                                             alpha: 0.84,
@@ -2640,7 +3225,9 @@ class _ThreadComposer extends StatelessWidget {
                           crossAxisAlignment: CrossAxisAlignment.center,
                           children: [
                             IconButton(
-                              onPressed: isSending ? null : onAttachTap,
+                              onPressed: widget.isSending
+                                  ? null
+                                  : widget.onAttachTap,
                               icon: Icon(
                                 LucideIcons.paperclip,
                                 color: kMessagesText.withValues(alpha: 0.78),
@@ -2662,8 +3249,12 @@ class _ThreadComposer extends StatelessWidget {
                                   children: [
                                     Expanded(
                                       child: TextField(
-                                        controller: controller,
-                                        onChanged: (_) => onChanged(),
+                                        controller: widget.controller,
+                                        focusNode: _focusNode,
+                                        onChanged: (_) => widget.onChanged(),
+                                        onTap: () => setState(
+                                          () => _isComposerActive = true,
+                                        ),
                                         minLines: 1,
                                         maxLines: 5,
                                         style: GoogleFonts.inter(
@@ -2686,7 +3277,15 @@ class _ThreadComposer extends StatelessWidget {
                                     ),
                                     const SizedBox(width: 10),
                                     GestureDetector(
-                                      onTap: isSending ? null : onCameraTap,
+                                      onTap: widget.isSending
+                                          ? null
+                                          : widget.onCameraTap,
+                                      onLongPress: widget.isSending
+                                          ? null
+                                          : widget.onCameraLongPress,
+                                      onLongPressEnd: widget.isSending
+                                          ? null
+                                          : widget.onCameraLongPressEnd,
                                       child: Icon(
                                         LucideIcons.camera,
                                         color: kMessagesText.withValues(
@@ -2705,20 +3304,28 @@ class _ThreadComposer extends StatelessWidget {
               ),
               const SizedBox(width: 10),
               GestureDetector(
-                onTap: isSending
+                onTap: widget.isSending
                     ? null
-                    : (showRecordComposer
-                          ? onRecordSend
-                          : (hasText ? onSendTap : onMicTap)),
+                    : (widget.showRecordComposer
+                          ? () {
+                              setState(() => _isComposerActive = false);
+                              widget.onRecordSend();
+                            }
+                          : (hasText
+                                ? () {
+                                    setState(() => _isComposerActive = false);
+                                    widget.onSendTap();
+                                  }
+                                : widget.onMicTap)),
                 onLongPressStart: hasText
                     ? null
                     : (_) {
-                        onMicPressStart();
+                        widget.onMicPressStart();
                       },
                 onLongPressMoveUpdate: hasText
                     ? null
                     : (details) {
-                        onMicPressMove(
+                        widget.onMicPressMove(
                           details.offsetFromOrigin.dx,
                           details.offsetFromOrigin.dy,
                         );
@@ -2726,19 +3333,22 @@ class _ThreadComposer extends StatelessWidget {
                 onLongPressEnd: hasText
                     ? null
                     : (_) {
-                        onMicPressEnd();
+                        widget.onMicPressEnd();
                       },
                 child: AnimatedContainer(
                   duration: const Duration(milliseconds: 180),
                   width: 58,
                   height: 58,
                   decoration: BoxDecoration(
-                    color: isRecording ? const Color(0xFFFF6678) : _kAccent,
+                    color: widget.isRecording
+                        ? const Color(0xFFFF6678)
+                        : _kAccent,
                     shape: BoxShape.circle,
                     boxShadow: [
                       BoxShadow(
-                        color:
-                            (isRecording ? const Color(0xFFFF6678) : _kAccent)
+                        color: (widget.isRecording
+                                    ? const Color(0xFFFF6678)
+                                    : _kAccent)
                                 .withValues(alpha: 0.24),
                         blurRadius: 18,
                         offset: const Offset(0, 8),
@@ -2746,7 +3356,7 @@ class _ThreadComposer extends StatelessWidget {
                     ],
                   ),
                   child: Center(
-                    child: isSending
+                    child: widget.isSending
                         ? const SizedBox(
                             width: 22,
                             height: 22,
@@ -2756,7 +3366,7 @@ class _ThreadComposer extends StatelessWidget {
                             ),
                           )
                         : Icon(
-                            showRecordComposer
+                            widget.showRecordComposer
                                 ? LucideIcons.send
                                 : hasText
                                 ? LucideIcons.send
@@ -2772,12 +3382,6 @@ class _ThreadComposer extends StatelessWidget {
         ],
       ),
     );
-  }
-
-  static String _formatDuration(Duration duration) {
-    final minutes = duration.inMinutes.toString();
-    final seconds = (duration.inSeconds % 60).toString().padLeft(2, '0');
-    return '$minutes:$seconds';
   }
 }
 
@@ -3526,6 +4130,73 @@ class _ChatOptionTile extends StatelessWidget {
         ),
       ),
       trailing: trailing,
+    );
+  }
+}
+
+class _VideoPlayerPage extends StatefulWidget {
+  const _VideoPlayerPage({required this.url});
+
+  final String url;
+
+  @override
+  State<_VideoPlayerPage> createState() => _VideoPlayerPageState();
+}
+
+class _VideoPlayerPageState extends State<_VideoPlayerPage> {
+  late final VideoPlayerController _controller;
+  bool _initialized = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _controller = VideoPlayerController.networkUrl(Uri.parse(widget.url))
+      ..initialize().then((_) {
+        if (mounted) {
+          setState(() => _initialized = true);
+          _controller.play();
+        }
+      });
+  }
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      backgroundColor: Colors.black,
+      appBar: AppBar(
+        backgroundColor: Colors.black,
+        iconTheme: const IconThemeData(color: Colors.white),
+      ),
+      body: Center(
+        child: _initialized
+            ? AspectRatio(
+                aspectRatio: _controller.value.aspectRatio,
+                child: VideoPlayer(_controller),
+              )
+            : const CircularProgressIndicator(color: kMessagesBlue),
+      ),
+      floatingActionButton: _initialized
+          ? FloatingActionButton(
+              backgroundColor: kMessagesBlue,
+              onPressed: () {
+                setState(() {
+                  _controller.value.isPlaying
+                      ? _controller.pause()
+                      : _controller.play();
+                });
+              },
+              child: Icon(
+                _controller.value.isPlaying ? Icons.pause : Icons.play_arrow,
+                color: Colors.white,
+              ),
+            )
+          : null,
     );
   }
 }

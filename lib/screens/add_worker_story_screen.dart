@@ -15,9 +15,8 @@ const _kMuted = Color(0xFF64748B);
 
 // ── Visibility options ────────────────────────────────────────────────────────
 const _kVisibilityOptions = [
-  'Visible par les gestionnaires',
-  'Gestionnaires proches de vous',
-  'Tous les gestionnaires',
+  'Les abonnés proches de moi',
+  'Tout le monde',
 ];
 
 class AddWorkerStoryScreen extends StatefulWidget {
@@ -43,6 +42,7 @@ class _AddWorkerStoryScreenState extends State<AddWorkerStoryScreen> {
   late String _selectedSpecialty;
   String _visibility = _kVisibilityOptions.first;
   bool _isPublishing = false;
+  double _uploadProgress = 0.0;
 
   @override
   void initState() {
@@ -141,7 +141,10 @@ class _AddWorkerStoryScreenState extends State<AddWorkerStoryScreen> {
       return;
     }
 
-    setState(() => _isPublishing = true);
+    setState(() {
+      _isPublishing = true;
+      _uploadProgress = 0.0;
+    });
     try {
       await _storyService.publishStory(
         workerName: widget.profile.username,
@@ -153,6 +156,9 @@ class _AddWorkerStoryScreenState extends State<AddWorkerStoryScreen> {
         mediaType: _mediaType,
         caption: _captionCtrl.text,
         visibility: _visibility,
+        onProgress: (p) {
+          if (mounted) setState(() => _uploadProgress = p);
+        },
       );
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
@@ -165,9 +171,18 @@ class _AddWorkerStoryScreenState extends State<AddWorkerStoryScreen> {
       }
     } catch (e) {
       debugPrint('Story publish UI error: $e');
-      if (mounted) _snack('Impossible de publier la story. Réessayez.');
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Échec de l\'envoi: $e')),
+        );
+      }
     } finally {
-      if (mounted) setState(() => _isPublishing = false);
+      if (mounted) {
+        setState(() {
+          _isPublishing = false;
+          _uploadProgress = 0.0;
+        });
+      }
     }
   }
 
@@ -289,60 +304,109 @@ class _AddWorkerStoryScreenState extends State<AddWorkerStoryScreen> {
   // ── State 2: Media preview ────────────────────────────────────────────────
 
   Widget _buildPreviewState() {
-    return Stack(
-      fit: StackFit.expand,
-      children: [
-        _buildMediaBackground(),
-        if (!_isVertical) _buildMediaForeground(),
-        // Overlay
-        SafeArea(
-          child: Column(
-            children: [
-              _buildTopBar(mediaSelected: true),
-              _buildRightTools(),
-              const Spacer(),
-              _buildBottomControls(),
-            ],
-          ),
+    return Container(
+      color: Colors.black,
+      child: SafeArea(
+        child: Column(
+          children: [
+            _buildTopBar(mediaSelected: true),
+            _buildRightTools(),
+            Expanded(child: _buildMediaWithCaption()),
+            _buildBottomControls(),
+          ],
         ),
-      ],
+      ),
     );
   }
 
-  Widget _buildMediaBackground() {
-    if (_mediaType == 'image') {
-      if (_isVertical) {
-        return Image.file(_selectedMedia!, fit: BoxFit.cover);
-      }
-      // Blurred expanded background for square/horizontal
-      return ImageFiltered(
-        imageFilter: ui.ImageFilter.blur(sigmaX: 22, sigmaY: 22),
-        child: Image.file(_selectedMedia!, fit: BoxFit.cover),
-      );
-    } else if (_mediaType == 'video' && _videoReady) {
-      if (_isVertical) {
-        return FittedBox(
-          fit: BoxFit.cover,
-          child: SizedBox(
-            width: _videoCtrl!.value.size.width,
-            height: _videoCtrl!.value.size.height,
-            child: VideoPlayer(_videoCtrl!),
-          ),
-        );
-      }
-      return ImageFiltered(
-        imageFilter: ui.ImageFilter.blur(sigmaX: 22, sigmaY: 22),
-        child: FittedBox(
-          fit: BoxFit.cover,
-          child: SizedBox(
-            width: _videoCtrl!.value.size.width,
-            height: _videoCtrl!.value.size.height,
-            child: VideoPlayer(_videoCtrl!),
+  Widget _buildMediaWithCaption() {
+    final targetRatio = _isVertical ? (9.0 / 16.0) : (16.0 / 9.0);
+    return Center(
+      child: AspectRatio(
+        aspectRatio: targetRatio,
+        child: ClipRRect(
+          borderRadius: BorderRadius.circular(12),
+          child: Stack(
+            fit: StackFit.expand,
+            children: [
+              // Background layer: blurred fill for landscape, cover for portrait
+              if (_mediaType == 'image')
+                _isVertical
+                    ? Image.file(_selectedMedia!, fit: BoxFit.cover)
+                    : ImageFiltered(
+                        imageFilter: ui.ImageFilter.blur(sigmaX: 22, sigmaY: 22),
+                        child: Image.file(_selectedMedia!, fit: BoxFit.cover),
+                      ),
+              if (_mediaType == 'video' && _videoReady)
+                _isVertical
+                    ? FittedBox(
+                        fit: BoxFit.cover,
+                        child: SizedBox(
+                          width: _videoCtrl!.value.size.width,
+                          height: _videoCtrl!.value.size.height,
+                          child: VideoPlayer(_videoCtrl!),
+                        ),
+                      )
+                    : ImageFiltered(
+                        imageFilter: ui.ImageFilter.blur(sigmaX: 22, sigmaY: 22),
+                        child: FittedBox(
+                          fit: BoxFit.cover,
+                          child: SizedBox(
+                            width: _videoCtrl!.value.size.width,
+                            height: _videoCtrl!.value.size.height,
+                            child: VideoPlayer(_videoCtrl!),
+                          ),
+                        ),
+                      ),
+              // Foreground centered media (landscape only)
+              if (!_isVertical) _buildMediaForeground(),
+              // Caption overlay at the bottom of the media
+              Positioned(
+                bottom: 0,
+                left: 0,
+                right: 0,
+                child: Container(
+                  decoration: const BoxDecoration(
+                    gradient: LinearGradient(
+                      begin: Alignment.bottomCenter,
+                      end: Alignment.topCenter,
+                      colors: [Colors.black87, Colors.transparent],
+                    ),
+                  ),
+                  padding: const EdgeInsets.fromLTRB(12, 32, 12, 12),
+                  child: TextField(
+                    controller: _captionCtrl,
+                    maxLength: 200,
+                    style: const TextStyle(color: Colors.white, fontSize: 14),
+                    decoration: InputDecoration(
+                      hintText: 'Ajouter une légende...',
+                      hintStyle: TextStyle(
+                        color: Colors.white.withValues(alpha: 0.60),
+                        fontSize: 14,
+                      ),
+                      prefixIcon: const Icon(
+                        LucideIcons.pencil,
+                        color: Colors.white60,
+                        size: 16,
+                      ),
+                      border: InputBorder.none,
+                      contentPadding: const EdgeInsets.symmetric(
+                        horizontal: 16,
+                        vertical: 10,
+                      ),
+                      counterStyle: const TextStyle(
+                        color: Colors.white38,
+                        fontSize: 11,
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+            ],
           ),
         ),
-      );
-    }
-    return Container(color: const Color(0xFF0A0E1A));
+      ),
+    );
   }
 
   Widget _buildMediaForeground() {
@@ -350,17 +414,18 @@ class _AddWorkerStoryScreenState extends State<AddWorkerStoryScreen> {
     if (_mediaType == 'image') {
       media = Image.file(_selectedMedia!, fit: BoxFit.contain);
     } else if (_mediaType == 'video' && _videoReady) {
-      media = AspectRatio(
-        aspectRatio: _videoCtrl!.value.aspectRatio,
-        child: VideoPlayer(_videoCtrl!),
+      media = FittedBox(
+        fit: BoxFit.contain,
+        child: SizedBox(
+          width: _videoCtrl!.value.size.width,
+          height: _videoCtrl!.value.size.height,
+          child: VideoPlayer(_videoCtrl!),
+        ),
       );
     } else {
       return const SizedBox.shrink();
     }
-
-    return Center(
-      child: ClipRRect(borderRadius: BorderRadius.circular(16), child: media),
-    );
+    return Center(child: media);
   }
 
   // ── Shared UI pieces ──────────────────────────────────────────────────────
@@ -427,48 +492,6 @@ class _AddWorkerStoryScreenState extends State<AddWorkerStoryScreen> {
       child: Column(
         mainAxisSize: MainAxisSize.min,
         children: [
-          // Caption field
-          Container(
-            decoration: BoxDecoration(
-              color: Colors.black.withValues(alpha: 0.34),
-              borderRadius: BorderRadius.circular(16),
-              border: Border.all(color: Colors.white.withValues(alpha: 0.20)),
-              boxShadow: [
-                BoxShadow(
-                  color: Colors.black.withValues(alpha: 0.24),
-                  blurRadius: 18,
-                  offset: const Offset(0, 10),
-                ),
-              ],
-            ),
-            child: TextField(
-              controller: _captionCtrl,
-              maxLength: 200,
-              style: const TextStyle(color: Colors.white, fontSize: 14),
-              decoration: InputDecoration(
-                hintText: 'Ajouter une légende...',
-                hintStyle: TextStyle(
-                  color: Colors.white.withValues(alpha: 0.50),
-                  fontSize: 14,
-                ),
-                prefixIcon: const Icon(
-                  LucideIcons.pencil,
-                  color: Colors.white54,
-                  size: 16,
-                ),
-                border: InputBorder.none,
-                contentPadding: const EdgeInsets.symmetric(
-                  horizontal: 16,
-                  vertical: 12,
-                ),
-                counterStyle: const TextStyle(
-                  color: Colors.white38,
-                  fontSize: 11,
-                ),
-              ),
-            ),
-          ),
-          const SizedBox(height: 10),
           // Specialty + visibility chips
           Row(
             children: [
@@ -478,6 +501,25 @@ class _AddWorkerStoryScreenState extends State<AddWorkerStoryScreen> {
             ],
           ),
           const SizedBox(height: 14),
+          // Upload progress indicator
+          if (_isPublishing) ...[
+            LinearProgressIndicator(
+              value: _uploadProgress,
+              color: _kBlue,
+              backgroundColor: _kBlue.withValues(alpha: 0.15),
+              minHeight: 4,
+              borderRadius: BorderRadius.circular(2),
+            ),
+            const SizedBox(height: 6),
+            Text(
+              'Publication en cours… ${(_uploadProgress * 100).toInt()}%',
+              style: const TextStyle(
+                color: _kMuted,
+                fontSize: 12,
+              ),
+            ),
+            const SizedBox(height: 10),
+          ],
           // Publish button
           SizedBox(
             width: double.infinity,

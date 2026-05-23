@@ -1121,6 +1121,7 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 
   Widget _buildBottomNavBar() {
+    final uid = FirebaseAuth.instance.currentUser?.uid ?? '';
     return Container(
       decoration: const BoxDecoration(
         color: Colors.white,
@@ -1156,10 +1157,8 @@ class _HomeScreenState extends State<HomeScreen> {
                 ),
               ),
               Expanded(
-                child: _BottomNavItem(
-                  icon: LucideIcons.messageCircle,
-                  label: 'Messages',
-                  active: false,
+                child: _HomeMessagesNavItem(
+                  uid: uid,
                   onTap: _openMessages,
                 ),
               ),
@@ -1200,10 +1199,15 @@ class _HomeScreenState extends State<HomeScreen> {
               padding: const EdgeInsets.fromLTRB(20, 170, 20, 10),
               child: Column(
                 children: [
+                  _buildCompleteProfileBanner()
+                      .animate()
+                      .fadeIn(duration: 280.ms)
+                      .slideY(begin: 0.04, duration: 280.ms),
+                  const SizedBox(height: 10),
                   Expanded(
                     child: _buildOffersCarousel()
                         .animate()
-                        .fadeIn(duration: 280.ms)
+                        .fadeIn(delay: 100.ms, duration: 280.ms)
                         .slideY(begin: 0.04, duration: 280.ms),
                   ),
                   const SizedBox(height: 10),
@@ -1211,14 +1215,9 @@ class _HomeScreenState extends State<HomeScreen> {
                     height: 155,
                     child: _buildSpecialtyCard()
                         .animate()
-                        .fadeIn(delay: 100.ms, duration: 280.ms)
+                        .fadeIn(delay: 200.ms, duration: 280.ms)
                         .slideY(begin: 0.04, duration: 280.ms),
                   ),
-                  const SizedBox(height: 10),
-                  _buildCompleteProfileBanner()
-                      .animate()
-                      .fadeIn(delay: 180.ms, duration: 280.ms)
-                      .slideY(begin: 0.04, duration: 280.ms),
                 ],
               ),
             ),
@@ -2136,6 +2135,94 @@ class _BottomNavItem extends StatelessWidget {
                 decoration: BoxDecoration(
                   color: kHomeBlue,
                   borderRadius: BorderRadius.circular(999),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _HomeMessagesNavItem extends StatelessWidget {
+  const _HomeMessagesNavItem({required this.uid, required this.onTap});
+
+  final String uid;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    const color = Color(0xFF7A859E);
+    return Material(
+      color: Colors.transparent,
+      child: InkWell(
+        onTap: onTap,
+        borderRadius: BorderRadius.circular(16),
+        child: Padding(
+          padding: const EdgeInsets.symmetric(vertical: 6),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              StreamBuilder<QuerySnapshot>(
+                stream: uid.isEmpty
+                    ? const Stream.empty()
+                    : FirebaseFirestore.instance
+                          .collection('conversations')
+                          .where('participants', arrayContains: uid)
+                          .snapshots(),
+                builder: (context, snapshot) {
+                  bool hasUnread = false;
+                  if (snapshot.hasData) {
+                    hasUnread = snapshot.data!.docs.any((doc) {
+                      final data = doc.data() as Map<String, dynamic>;
+                      final unreadBy =
+                          data['unreadBy'] as Map<String, dynamic>? ?? {};
+                      return (unreadBy[uid] ?? 0) > 0;
+                    });
+                  }
+                  return Stack(
+                    clipBehavior: Clip.none,
+                    children: [
+                      const Icon(
+                        LucideIcons.messageCircle,
+                        color: color,
+                        size: 22,
+                      ),
+                      if (hasUnread)
+                        Positioned(
+                          top: -2,
+                          right: -4,
+                          child: Container(
+                            width: 8,
+                            height: 8,
+                            decoration: const BoxDecoration(
+                              color: Color(0xFFFF3B30),
+                              shape: BoxShape.circle,
+                            ),
+                          ),
+                        ),
+                    ],
+                  );
+                },
+              ),
+              const SizedBox(height: 6),
+              const Text(
+                'Messages',
+                style: TextStyle(
+                  color: color,
+                  fontSize: 12.5,
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
+              const SizedBox(height: 7),
+              AnimatedContainer(
+                duration: const Duration(milliseconds: 180),
+                width: 0,
+                height: 3,
+                decoration: const BoxDecoration(
+                  color: kHomeBlue,
+                  borderRadius: BorderRadius.all(Radius.circular(999)),
                 ),
               ),
             ],

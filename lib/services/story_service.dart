@@ -155,6 +155,7 @@ class StoryService {
     required String mediaType,
     required String caption,
     required String visibility,
+    void Function(double progress)? onProgress,
   }) async {
     final uid = _uid;
     if (uid == null) throw StateError('Utilisateur non connecté');
@@ -166,7 +167,14 @@ class StoryService {
     final uploaded = await VpsMediaService.uploadFile(
       file: mediaFile,
       category: category,
+      onProgress: onProgress,
     );
+
+    if (uploaded.url.trim().isEmpty) {
+      throw Exception(
+        'L\'URL du média est vide après l\'envoi. Vérifiez la connexion au serveur.',
+      );
+    }
     final location = await _capturePublishLocation();
 
     final storyRef = _firestore.collection('stories').doc();

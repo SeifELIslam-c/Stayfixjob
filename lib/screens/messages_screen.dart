@@ -1,3 +1,4 @@
+import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
@@ -1211,6 +1212,8 @@ class _MessagesBottomNav extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final uid = FirebaseAuth.instance.currentUser?.uid ?? '';
+
     return Container(
       decoration: const BoxDecoration(
         color: Colors.white,
@@ -1246,11 +1249,12 @@ class _MessagesBottomNav extends StatelessWidget {
                 ),
               ),
               Expanded(
-                child: _BottomNavItem(
+                child: _BottomNavItemWithBadge(
                   icon: LucideIcons.messageCircle,
                   label: 'Messages',
                   active: true,
                   onTap: onMessagesTap,
+                  uid: uid,
                 ),
               ),
               Expanded(
@@ -1263,6 +1267,96 @@ class _MessagesBottomNav extends StatelessWidget {
               ),
             ],
           ),
+        ),
+      ),
+    );
+  }
+}
+
+class _BottomNavItemWithBadge extends StatelessWidget {
+  const _BottomNavItemWithBadge({
+    required this.icon,
+    required this.label,
+    required this.active,
+    required this.onTap,
+    required this.uid,
+  });
+
+  final IconData icon;
+  final String label;
+  final bool active;
+  final VoidCallback onTap;
+  final String uid;
+
+  @override
+  Widget build(BuildContext context) {
+    final color = active ? kMessagesBlue : kMessagesMuted;
+    return InkWell(
+      onTap: onTap,
+      borderRadius: BorderRadius.circular(16),
+      child: Padding(
+        padding: const EdgeInsets.symmetric(vertical: 4),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            StreamBuilder<QuerySnapshot>(
+              stream: uid.isEmpty
+                  ? const Stream.empty()
+                  : FirebaseFirestore.instance
+                        .collection('conversations')
+                        .where('participants', arrayContains: uid)
+                        .snapshots(),
+              builder: (context, snapshot) {
+                bool hasUnread = false;
+                if (snapshot.hasData) {
+                  hasUnread = snapshot.data!.docs.any((doc) {
+                    final data = doc.data() as Map<String, dynamic>;
+                    final unreadBy =
+                        data['unreadBy'] as Map<String, dynamic>? ?? {};
+                    return (unreadBy[uid] ?? 0) > 0;
+                  });
+                }
+                return Stack(
+                  clipBehavior: Clip.none,
+                  children: [
+                    Icon(icon, color: color, size: 21),
+                    if (hasUnread)
+                      Positioned(
+                        top: -2,
+                        right: -4,
+                        child: Container(
+                          width: 8,
+                          height: 8,
+                          decoration: const BoxDecoration(
+                            color: Color(0xFFFF3B30),
+                            shape: BoxShape.circle,
+                          ),
+                        ),
+                      ),
+                  ],
+                );
+              },
+            ),
+            const SizedBox(height: 4),
+            Text(
+              label,
+              style: TextStyle(
+                color: color,
+                fontSize: 12.5,
+                fontWeight: active ? FontWeight.w800 : FontWeight.w600,
+              ),
+            ),
+            const SizedBox(height: 5),
+            AnimatedContainer(
+              duration: const Duration(milliseconds: 180),
+              width: active ? 26 : 0,
+              height: 3,
+              decoration: BoxDecoration(
+                color: kMessagesBlue,
+                borderRadius: BorderRadius.circular(999),
+              ),
+            ),
+          ],
         ),
       ),
     );

@@ -90,6 +90,7 @@ class _ProfileScreenState extends State<ProfileScreen> {
   TimeOfDay _quickAvailabilityFrom = const TimeOfDay(hour: 8, minute: 0);
   TimeOfDay _quickAvailabilityTo = const TimeOfDay(hour: 16, minute: 0);
   bool _didRunCompletionAutofocus = false;
+  List<String> _pendingRoles = [];
 
   // ignore: prefer_final_fields
   List<Map<String, dynamic>> _departmentsData = [
@@ -533,6 +534,18 @@ class _ProfileScreenState extends State<ProfileScreen> {
             ).formatted;
           });
           _libreDays.sort((a, b) => a.compareTo(b));
+        }
+
+        // Load pending roles from workers collection
+        final workerDoc = await FirebaseFirestore.instance
+            .collection('workers')
+            .doc(user.uid)
+            .get();
+        if (workerDoc.exists && mounted) {
+          final pendingRaw = workerDoc.data()?['pendingRoles'];
+          setState(() {
+            _pendingRoles = List<String>.from(pendingRaw ?? []);
+          });
         }
 
         _checkNotifications();
@@ -1466,6 +1479,187 @@ class _ProfileScreenState extends State<ProfileScreen> {
           },
         );
       },
+    );
+  }
+
+  Future<void> _showAddDepartmentRoleSheet() async {
+    if (_department.trim().isEmpty) return;
+
+    final deptSpecialties = _currentDepartmentSpecialties();
+    final color = _departmentColor(_department);
+
+    await showModalBottomSheet<void>(
+      context: context,
+      backgroundColor: Colors.transparent,
+      isScrollControlled: true,
+      builder: (ctx) => SafeArea(
+        top: false,
+        child: Container(
+          padding: const EdgeInsets.fromLTRB(20, 14, 20, 24),
+          decoration: const BoxDecoration(
+            color: Colors.white,
+            borderRadius: BorderRadius.vertical(top: Radius.circular(32)),
+          ),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Center(child: _sheetHandle()),
+              Row(
+                children: [
+                  Container(
+                    width: 40,
+                    height: 40,
+                    decoration: BoxDecoration(
+                      color: color.withValues(alpha: 0.12),
+                      borderRadius: BorderRadius.circular(14),
+                    ),
+                    child: Icon(LucideIcons.plus, color: color, size: 20),
+                  ),
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        const Text(
+                          'Ajouter un role',
+                          style: TextStyle(
+                            color: kProfileText,
+                            fontSize: 18,
+                            fontWeight: FontWeight.w800,
+                            letterSpacing: -0.3,
+                          ),
+                        ),
+                        Text(
+                          _department,
+                          style: TextStyle(
+                            color: color,
+                            fontSize: 12.5,
+                            fontWeight: FontWeight.w700,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 14),
+              const Text(
+                'Choisissez un role a soumettre pour validation.',
+                style: TextStyle(
+                  color: kProfileMuted,
+                  fontSize: 13,
+                  fontWeight: FontWeight.w600,
+                  height: 1.4,
+                ),
+              ),
+              const SizedBox(height: 12),
+              if (deptSpecialties.isEmpty)
+                Padding(
+                  padding: const EdgeInsets.symmetric(vertical: 12),
+                  child: Text(
+                    'Aucun role disponible pour ce departement.',
+                    style: TextStyle(color: kProfileMuted, fontSize: 13),
+                  ),
+                )
+              else
+                ...deptSpecialties.map((role) {
+                  final isPending = _pendingRoles.contains(role);
+                  return InkWell(
+                    onTap: isPending
+                        ? null
+                        : () async {
+                            Navigator.pop(ctx);
+                            try {
+                              final uid =
+                                  FirebaseAuth.instance.currentUser?.uid;
+                              if (uid != null) {
+                                await FirebaseFirestore.instance
+                                    .collection('workers')
+                                    .doc(uid)
+                                    .set(
+                                      {
+                                        'pendingRoles':
+                                            FieldValue.arrayUnion([role]),
+                                      },
+                                      SetOptions(merge: true),
+                                    );
+                                if (mounted) {
+                                  setState(() {
+                                    if (!_pendingRoles.contains(role)) {
+                                      _pendingRoles = [..._pendingRoles, role];
+                                    }
+                                  });
+                                  _showInfo(
+                                    'Role ajouté en attente de validation',
+                                  );
+                                }
+                              }
+                            } catch (e) {
+                              if (mounted) {
+                                _showInfo('Erreur: $e', isError: true);
+                              }
+                            }
+                          },
+                    borderRadius: BorderRadius.circular(14),
+                    child: Container(
+                      width: double.infinity,
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 14,
+                        vertical: 13,
+                      ),
+                      margin: const EdgeInsets.only(bottom: 8),
+                      decoration: BoxDecoration(
+                        color: isPending
+                            ? const Color(0xFFFFF3CD)
+                            : const Color(0xFFF8FBFF),
+                        borderRadius: BorderRadius.circular(14),
+                        border: Border.all(
+                          color: isPending
+                              ? const Color(0xFFF59E0B)
+                              : kProfileBorder,
+                        ),
+                      ),
+                      child: Row(
+                        children: [
+                          Icon(
+                            _specialtyIcon(role),
+                            size: 16,
+                            color: isPending
+                                ? const Color(0xFF92400E)
+                                : kProfileMuted,
+                          ),
+                          const SizedBox(width: 10),
+                          Expanded(
+                            child: Text(
+                              role,
+                              style: TextStyle(
+                                color: isPending
+                                    ? const Color(0xFF92400E)
+                                    : kProfileText,
+                                fontSize: 14,
+                                fontWeight: FontWeight.w700,
+                              ),
+                            ),
+                          ),
+                          if (isPending)
+                            const Text(
+                              'En attente',
+                              style: TextStyle(
+                                color: Color(0xFF92400E),
+                                fontSize: 11.5,
+                                fontWeight: FontWeight.w700,
+                              ),
+                            ),
+                        ],
+                      ),
+                    ),
+                  );
+                }),
+            ],
+          ),
+        ),
+      ),
     );
   }
 
@@ -3375,6 +3569,71 @@ class _ProfileScreenState extends State<ProfileScreen> {
             ),
           ),
         ],
+        if (_pendingRoles.isNotEmpty) ...[
+          const SizedBox(height: 12),
+          const Text(
+            'Roles en attente de validation',
+            style: TextStyle(
+              color: kProfileMuted,
+              fontSize: 12,
+              fontWeight: FontWeight.w700,
+            ),
+          ),
+          const SizedBox(height: 8),
+          Wrap(
+            spacing: 8,
+            runSpacing: 8,
+            children: _pendingRoles.map((role) {
+              return Container(
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 12,
+                  vertical: 10,
+                ),
+                decoration: BoxDecoration(
+                  color: const Color(0xFFFFF3CD),
+                  borderRadius: BorderRadius.circular(18),
+                  border: Border.all(color: const Color(0xFFF59E0B)),
+                ),
+                child: Text(
+                  '$role · En attente',
+                  style: const TextStyle(
+                    color: Color(0xFF92400E),
+                    fontSize: 12.5,
+                    fontWeight: FontWeight.w700,
+                  ),
+                ),
+              );
+            }).toList(),
+          ),
+        ],
+        const SizedBox(height: 10),
+        InkWell(
+          onTap: () => _showAddDepartmentRoleSheet(),
+          borderRadius: BorderRadius.circular(18),
+          child: Container(
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+            decoration: BoxDecoration(
+              color: Colors.white,
+              borderRadius: BorderRadius.circular(18),
+              border: Border.all(color: kProfileBorder),
+            ),
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                const Icon(LucideIcons.plus, size: 15, color: kProfileMuted),
+                const SizedBox(width: 8),
+                Text(
+                  'Ajouter',
+                  style: TextStyle(
+                    color: color,
+                    fontSize: 12.5,
+                    fontWeight: FontWeight.w700,
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
       ],
     );
   }
@@ -3879,6 +4138,72 @@ class _ProfileScreenState extends State<ProfileScreen> {
     );
   }
 
+  Widget _buildApercuButton() {
+    return GestureDetector(
+      onTap: null, // routing will be added later
+      child: Container(
+        width: double.infinity,
+        padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 18),
+        decoration: BoxDecoration(
+          gradient: const LinearGradient(
+            colors: [Color(0xFF0F63FF), Color(0xFF1C4FCE)],
+            begin: Alignment.topLeft,
+            end: Alignment.bottomRight,
+          ),
+          borderRadius: BorderRadius.circular(20),
+          boxShadow: const [
+            BoxShadow(
+              color: Color(0x280F63FF),
+              blurRadius: 20,
+              offset: Offset(0, 8),
+            ),
+          ],
+        ),
+        child: Row(
+          children: [
+            Container(
+              width: 44,
+              height: 44,
+              decoration: BoxDecoration(
+                color: Colors.white.withValues(alpha: 0.18),
+                borderRadius: BorderRadius.circular(14),
+              ),
+              child: const Icon(LucideIcons.eye, color: Colors.white, size: 22),
+            ),
+            const SizedBox(width: 14),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  const Text(
+                    'Aperçu de mon profil',
+                    style: TextStyle(
+                      color: Colors.white,
+                      fontSize: 15.5,
+                      fontWeight: FontWeight.w700,
+                      letterSpacing: -0.2,
+                    ),
+                  ),
+                  const SizedBox(height: 3),
+                  Text(
+                    'Voyez comment votre profil apparaît aux entreprises et employeurs',
+                    style: TextStyle(
+                      color: Colors.white.withValues(alpha: 0.82),
+                      fontSize: 12,
+                      height: 1.4,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            const SizedBox(width: 10),
+            const Icon(LucideIcons.chevronRight, color: Colors.white, size: 20),
+          ],
+        ),
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -3951,6 +4276,10 @@ class _ProfileScreenState extends State<ProfileScreen> {
                                       icon: LucideIcons.clock3,
                                       title: 'Disponibilite',
                                     ),
+                                    if (widget.completionMode) ...[
+                                      const SizedBox(height: 16),
+                                      _buildApercuButton(),
+                                    ],
                                   ],
                                 ),
                               ),

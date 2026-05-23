@@ -44,5 +44,9 @@
 	<string>Votre position est utilisee pour verifier que vous etes bien dans la zone de travail avant le pointage.</string>
 	<key>ITSAppUsesNonExemptEncryption</key>
 	<false/>
+	<key>NSCameraUsageDescription</key>
+	<string>L'accès à la caméra est nécessaire pour enregistrer des vidéos et prendre des photos.</string>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>L'accès au microphone est nécessaire pour enregistrer des vidéos avec du son.</string>
 </dict>
 </plist>
