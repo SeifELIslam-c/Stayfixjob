@@ -350,6 +350,12 @@ class _HomeScreenState extends State<HomeScreen> {
             _buildSuggestionChip(LucideIcons.clock3, 'Mettez à jour vos disponibilités'),
             const SizedBox(height: 8),
             _buildSuggestionChip(LucideIcons.mapPin, 'Activez votre localisation'),
+            const SizedBox(height: 8),
+            _buildSuggestionChip(LucideIcons.camera, 'Ajoutez une photo de profil'),
+            const SizedBox(height: 8),
+            _buildSuggestionChip(LucideIcons.briefcase, 'Renseignez votre expérience'),
+            const SizedBox(height: 8),
+            _buildSuggestionChip(LucideIcons.bell, 'Activez les notifications'),
           ],
         ),
       );

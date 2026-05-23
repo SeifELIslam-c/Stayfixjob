@@ -156,6 +156,9 @@ class StoryService {
     required String caption,
     required String visibility,
     void Function(double progress)? onProgress,
+    String overlayText = '',
+    double overlayTextX = 0.5,
+    double overlayTextY = 0.4,
   }) async {
     final uid = _uid;
     if (uid == null) throw StateError('Utilisateur non connecté');
@@ -199,6 +202,9 @@ class StoryService {
       'kind': category,
       'isActive': true,
       'isAvailableSnapshot': isAvailable,
+      'overlayText': overlayText,
+      'overlayTextX': overlayTextX,
+      'overlayTextY': overlayTextY,
       if (location != null) 'latitude': location.latitude,
       if (location != null) 'longitude': location.longitude,
       if (location != null)

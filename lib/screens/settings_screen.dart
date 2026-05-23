@@ -40,8 +40,10 @@ class _SettingsScreenState extends State<SettingsScreen> {
   final _referralEmployeeIdCtrl = TextEditingController();
 
   bool _isLoading = true;
-  bool _speaksFrench = true;
-  bool _speaksEnglish = false;
+  bool _accountDirty = false;
+  bool _coordonneesDirty = false;
+  bool _privacyDirty = false;
+  bool _eligibilityDirty = false;
   bool? _privacyAccepted;
   bool? _referredByEmployee;
   bool? _authorizedToWorkCanada;
@@ -100,8 +102,6 @@ class _SettingsScreenState extends State<SettingsScreen> {
           _phoneComplete = _phoneDialCode.isEmpty
               ? _phoneCtrl.text.trim()
               : '+$_phoneDialCode${_phoneCtrl.text.trim()}';
-          _speaksFrench = data['speaksFrench'] ?? true;
-          _speaksEnglish = data['speaksEnglish'] ?? false;
           _privacyAccepted =
               data['cvReviewAuthorization'] as bool? ??
               questionnaire['privacyAccepted'] as bool?;
@@ -153,71 +153,47 @@ class _SettingsScreenState extends State<SettingsScreen> {
     return cleanDialCode.isEmpty ? cleanNumber : '+$cleanDialCode$cleanNumber';
   }
 
-  Future<void> _saveAll() async {
-    if (mounted) {
-      setState(() => _isLoading = true);
-    }
+  Widget _buildSectionSaveButton(VoidCallback onPressed) {
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(16, 12, 16, 8),
+      child: SizedBox(
+        width: double.infinity,
+        child: FilledButton.icon(
+          onPressed: _isLoading ? null : onPressed,
+          icon: const Icon(Icons.save_rounded, size: 18),
+          label: const Text('Enregistrer'),
+          style: FilledButton.styleFrom(
+            padding: const EdgeInsets.symmetric(vertical: 14),
+            shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(14)),
+          ),
+        ),
+      ),
+    );
+  }
 
+  Future<void> _saveAccount() async {
+    if (mounted) setState(() => _isLoading = true);
     try {
       final user = FirebaseAuth.instance.currentUser!;
-      final updatedQuestionnaire = <String, dynamic>{
-        ..._existingCvQuestionnaire,
-      };
-
-      if (_privacyAccepted != null) {
-        updatedQuestionnaire['privacyAccepted'] = _privacyAccepted;
-      }
-      if (_referredByEmployee != null) {
-        updatedQuestionnaire['referredByEmployee'] = _referredByEmployee;
-        updatedQuestionnaire['referralEmployeeId'] = _referredByEmployee == true
-            ? _referralEmployeeIdCtrl.text.trim()
-            : '';
-      }
-      if (_authorizedToWorkCanada != null) {
-        updatedQuestionnaire['authorizedToWorkCanada'] =
-            _authorizedToWorkCanada;
-      }
-      if (_isAdult != null) {
-        updatedQuestionnaire['isAdult'] = _isAdult;
-      }
-      if (_noCriminalRecord != null) {
-        updatedQuestionnaire['noCriminalRecord'] = _noCriminalRecord;
-      }
-
       await FirebaseFirestore.instance
           .collection('profiles')
           .doc(user.uid)
           .update({
-            'username': _nameCtrl.text.trim(),
-            'address': _addressCtrl.text.trim(),
-            'addressLatitude': _addressLatitude,
-            'addressLongitude': _addressLongitude,
-            'phone': _phoneComplete.isNotEmpty
-                ? _phoneComplete
-                : _phoneCtrl.text.trim(),
-            'phoneNational': _phoneCtrl.text.trim(),
-            'phoneCountryIso': _phoneCountryIso,
-            'phoneDialCode': _phoneDialCode,
-            'dob': _dobCtrl.text.trim(),
-            'speaksFrench': _speaksFrench,
-            'speaksEnglish': _speaksEnglish,
-            'cvQuestionnaire': updatedQuestionnaire,
-            if (_privacyAccepted != null)
-              'cvReviewAuthorization': _privacyAccepted,
-          });
-
+        'username': _nameCtrl.text.trim(),
+        'dob': _dobCtrl.text.trim(),
+      });
       if (_emailCtrl.text.trim() != user.email) {
         await user.verifyBeforeUpdateEmail(_emailCtrl.text.trim());
       }
-
       if (_passCtrl.text.trim().isNotEmpty) {
         await user.updatePassword(_passCtrl.text.trim());
       }
-
       if (!mounted) return;
+      setState(() => _accountDirty = false);
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
-          content: Text('Parametres sauvegardes avec succes !'),
+          content: Text('Compte sauvegarde avec succes !'),
           backgroundColor: Colors.green,
         ),
       );
@@ -231,9 +207,140 @@ class _SettingsScreenState extends State<SettingsScreen> {
         ),
       );
     } finally {
-      if (mounted) {
-        setState(() => _isLoading = false);
+      if (mounted) setState(() => _isLoading = false);
+    }
+  }
+
+  Future<void> _saveCoordonnees() async {
+    if (mounted) setState(() => _isLoading = true);
+    try {
+      final user = FirebaseAuth.instance.currentUser!;
+      await FirebaseFirestore.instance
+          .collection('profiles')
+          .doc(user.uid)
+          .update({
+        'phone': _phoneComplete.isNotEmpty
+            ? _phoneComplete
+            : _phoneCtrl.text.trim(),
+        'phoneNational': _phoneCtrl.text.trim(),
+        'phoneCountryIso': _phoneCountryIso,
+        'phoneDialCode': _phoneDialCode,
+        'address': _addressCtrl.text.trim(),
+        'addressLatitude': _addressLatitude,
+        'addressLongitude': _addressLongitude,
+      });
+      if (!mounted) return;
+      setState(() => _coordonneesDirty = false);
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Coordonnees sauvegardees avec succes !'),
+          backgroundColor: Colors.green,
+        ),
+      );
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('Erreur: ${e.toString()}'),
+          backgroundColor: Colors.red,
+        ),
+      );
+    } finally {
+      if (mounted) setState(() => _isLoading = false);
+    }
+  }
+
+  Future<void> _savePrivacy() async {
+    if (mounted) setState(() => _isLoading = true);
+    try {
+      final user = FirebaseAuth.instance.currentUser!;
+      final updatedQuestionnaire = <String, dynamic>{
+        ..._existingCvQuestionnaire,
+      };
+      if (_privacyAccepted != null) {
+        updatedQuestionnaire['privacyAccepted'] = _privacyAccepted;
       }
+      await FirebaseFirestore.instance
+          .collection('profiles')
+          .doc(user.uid)
+          .update({
+        'cvQuestionnaire': updatedQuestionnaire,
+        if (_privacyAccepted != null)
+          'cvReviewAuthorization': _privacyAccepted,
+      });
+      if (!mounted) return;
+      setState(() {
+        _existingCvQuestionnaire = updatedQuestionnaire;
+        _privacyDirty = false;
+      });
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Confidentialite sauvegardee avec succes !'),
+          backgroundColor: Colors.green,
+        ),
+      );
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('Erreur: ${e.toString()}'),
+          backgroundColor: Colors.red,
+        ),
+      );
+    } finally {
+      if (mounted) setState(() => _isLoading = false);
+    }
+  }
+
+  Future<void> _saveEligibility() async {
+    if (mounted) setState(() => _isLoading = true);
+    try {
+      final user = FirebaseAuth.instance.currentUser!;
+      final updatedQuestionnaire = <String, dynamic>{
+        ..._existingCvQuestionnaire,
+      };
+      if (_referredByEmployee != null) {
+        updatedQuestionnaire['referredByEmployee'] = _referredByEmployee;
+        updatedQuestionnaire['referralEmployeeId'] =
+            _referredByEmployee == true
+                ? _referralEmployeeIdCtrl.text.trim()
+                : '';
+      }
+      if (_authorizedToWorkCanada != null) {
+        updatedQuestionnaire['authorizedToWorkCanada'] =
+            _authorizedToWorkCanada;
+      }
+      if (_isAdult != null) {
+        updatedQuestionnaire['isAdult'] = _isAdult;
+      }
+      if (_noCriminalRecord != null) {
+        updatedQuestionnaire['noCriminalRecord'] = _noCriminalRecord;
+      }
+      await FirebaseFirestore.instance
+          .collection('profiles')
+          .doc(user.uid)
+          .update({'cvQuestionnaire': updatedQuestionnaire});
+      if (!mounted) return;
+      setState(() {
+        _existingCvQuestionnaire = updatedQuestionnaire;
+        _eligibilityDirty = false;
+      });
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Admissibilite sauvegardee avec succes !'),
+          backgroundColor: Colors.green,
+        ),
+      );
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('Erreur: ${e.toString()}'),
+          backgroundColor: Colors.red,
+        ),
+      );
+    } finally {
+      if (mounted) setState(() => _isLoading = false);
     }
   }
 
@@ -882,47 +989,65 @@ class _SettingsScreenState extends State<SettingsScreen> {
         icon: LucideIcons.user,
         label: "Nom d'utilisateur",
         value: _displayValue(_nameCtrl.text),
-        onTap: () =>
-            _editTextField(title: "Nom d'utilisateur", controller: _nameCtrl),
+        onTap: () async {
+          await _editTextField(
+              title: "Nom d'utilisateur", controller: _nameCtrl);
+          setState(() => _accountDirty = true);
+        },
       ),
       _matrixInfoTile(
         icon: LucideIcons.mail,
         label: 'Email',
         value: _displayValue(_emailCtrl.text),
-        onTap: () => _editTextField(
-          title: 'Email',
-          controller: _emailCtrl,
-          keyboardType: TextInputType.emailAddress,
-        ),
+        onTap: () async {
+          await _editTextField(
+            title: 'Email',
+            controller: _emailCtrl,
+            keyboardType: TextInputType.emailAddress,
+          );
+          setState(() => _accountDirty = true);
+        },
       ),
       _matrixInfoTile(
         icon: LucideIcons.lock,
         label: 'Nouveau mot de passe',
         value: _maskedPassword(),
-        onTap: () => _editTextField(
-          title: 'Nouveau mot de passe',
-          controller: _passCtrl,
-          obscureText: true,
-          hintText: 'Laisser vide pour ne pas changer',
-        ),
+        onTap: () async {
+          await _editTextField(
+            title: 'Nouveau mot de passe',
+            controller: _passCtrl,
+            obscureText: true,
+            hintText: 'Laisser vide pour ne pas changer',
+          );
+          setState(() => _accountDirty = true);
+        },
       ),
       _matrixInfoTile(
         icon: LucideIcons.calendar,
         label: 'Date de naissance',
         value: _displayValue(_dobCtrl.text),
-        onTap: _pickDob,
+        onTap: () async {
+          await _pickDob();
+          setState(() => _accountDirty = true);
+        },
       ),
       _matrixInfoTile(
         icon: LucideIcons.phone,
         label: 'Telephone',
         value: _phoneSummary(),
-        onTap: _showPhoneEditorSheet,
+        onTap: () async {
+          await _showPhoneEditorSheet();
+          setState(() => _accountDirty = true);
+        },
       ),
       _matrixInfoTile(
         icon: LucideIcons.mapPin,
         label: 'Adresse',
         value: _displayValue(_addressCtrl.text),
-        onTap: _pickAddress,
+        onTap: () async {
+          await _pickAddress();
+          setState(() => _accountDirty = true);
+        },
       ),
     ];
 
@@ -937,18 +1062,24 @@ class _SettingsScreenState extends State<SettingsScreen> {
                 items[i],
                 if (i != items.length - 1) const SizedBox(height: 12),
               ],
+              if (_accountDirty) _buildSectionSaveButton(_saveAccount),
             ],
           );
         }
 
-        return GridView.count(
-          shrinkWrap: true,
-          physics: const NeverScrollableScrollPhysics(),
-          crossAxisCount: 2,
-          crossAxisSpacing: 12,
-          mainAxisSpacing: 12,
-          childAspectRatio: 1.7,
-          children: items,
+        return Column(
+          children: [
+            GridView.count(
+              shrinkWrap: true,
+              physics: const NeverScrollableScrollPhysics(),
+              crossAxisCount: 2,
+              crossAxisSpacing: 12,
+              mainAxisSpacing: 12,
+              childAspectRatio: 1.7,
+              children: items,
+            ),
+            if (_accountDirty) _buildSectionSaveButton(_saveAccount),
+          ],
         );
       },
     );
@@ -957,89 +1088,26 @@ class _SettingsScreenState extends State<SettingsScreen> {
   Widget _buildCoordonneesSection() {
     return Column(
       children: [
-        Container(
-          padding: const EdgeInsets.all(16),
-          decoration: BoxDecoration(
-            color: Colors.white,
-            borderRadius: BorderRadius.circular(22),
-            border: Border.all(color: kSettingsBorder),
-          ),
-          child: IntlPhoneField(
-            key: ValueKey(_resolvedPhoneCountryIso()),
-            controller: _phoneCtrl,
-            disableLengthCheck: true,
-            style: const TextStyle(color: kSettingsText),
-            dropdownTextStyle: const TextStyle(color: kSettingsText),
-            dropdownIcon: const Icon(
-              Icons.arrow_drop_down,
-              color: kSettingsMuted,
-            ),
-            pickerDialogStyle: PickerDialogStyle(
-              backgroundColor: Colors.white,
-              countryCodeStyle: const TextStyle(color: kSettingsText),
-              countryNameStyle: const TextStyle(color: kSettingsText),
-              searchFieldCursorColor: kSettingsBlue,
-              searchFieldInputDecoration: InputDecoration(
-                hintText: 'Rechercher...',
-                hintStyle: const TextStyle(color: kSettingsMuted),
-                filled: true,
-                fillColor: const Color(0xFFF8FAFF),
-                prefixIcon: const Icon(
-                  CupertinoIcons.search,
-                  color: kSettingsMuted,
-                ),
-                border: OutlineInputBorder(
-                  borderRadius: BorderRadius.circular(12),
-                  borderSide: BorderSide.none,
-                ),
-              ),
-            ),
-            decoration: InputDecoration(
-              labelText: 'Numero de telephone',
-              labelStyle: const TextStyle(color: kSettingsMuted),
-              counterText: '',
-              filled: true,
-              fillColor: const Color(0xFFF8FAFF),
-              border: OutlineInputBorder(
-                borderRadius: BorderRadius.circular(16),
-                borderSide: const BorderSide(color: kSettingsBorder),
-              ),
-              enabledBorder: OutlineInputBorder(
-                borderRadius: BorderRadius.circular(16),
-                borderSide: const BorderSide(color: kSettingsBorder),
-              ),
-              focusedBorder: OutlineInputBorder(
-                borderRadius: BorderRadius.circular(16),
-                borderSide: const BorderSide(color: kSettingsBlue, width: 1.5),
-              ),
-            ),
-            initialCountryCode: _resolvedPhoneCountryIso(),
-            onChanged: (phone) {
-              setState(() {
-                _phoneComplete = phone.completeNumber;
-                _phoneCountryIso = phone.countryISOCode;
-                _phoneDialCode = phone.countryCode.replaceAll('+', '');
-              });
-            },
-            onCountryChanged: (country) {
-              setState(() {
-                _phoneCountryIso = country.code;
-                _phoneDialCode = country.dialCode;
-                _phoneComplete = _composePhoneNumber(
-                  country.dialCode,
-                  _phoneCtrl.text,
-                );
-              });
-            },
-          ),
+        _matrixInfoTile(
+          icon: LucideIcons.phone,
+          label: 'Numéro de téléphone',
+          value: _phoneSummary(),
+          onTap: () async {
+            await _showPhoneEditorSheet();
+            setState(() => _coordonneesDirty = true);
+          },
         ),
         const SizedBox(height: 12),
         _matrixInfoTile(
           icon: LucideIcons.mapPin,
           label: 'Adresse',
           value: _displayValue(_addressCtrl.text),
-          onTap: _pickAddress,
+          onTap: () async {
+            await _pickAddress();
+            setState(() => _coordonneesDirty = true);
+          },
         ),
+        if (_coordonneesDirty) _buildSectionSaveButton(_saveCoordonnees),
       ],
     );
   }
@@ -1082,101 +1150,6 @@ class _SettingsScreenState extends State<SettingsScreen> {
             ),
           ],
         ),
-      ),
-    );
-  }
-
-  Widget _buildLanguagesSection() {
-    return Container(
-      padding: const EdgeInsets.all(16),
-      decoration: BoxDecoration(
-        color: Colors.white,
-        borderRadius: BorderRadius.circular(24),
-        border: Border.all(color: kSettingsBorder),
-      ),
-      child: Row(
-        children: [
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                const Text(
-                  'Parlez-vous francais ?',
-                  style: TextStyle(
-                    color: kSettingsText,
-                    fontSize: 16,
-                    fontWeight: FontWeight.w800,
-                  ),
-                ),
-                const SizedBox(height: 14),
-                Row(
-                  children: [
-                    Expanded(
-                      child: _binaryOption(
-                        label: 'Oui',
-                        selected: _speaksFrench,
-                        yesStyle: true,
-                        onTap: () => setState(() => _speaksFrench = true),
-                      ),
-                    ),
-                    const SizedBox(width: 10),
-                    Expanded(
-                      child: _binaryOption(
-                        label: 'Non',
-                        selected: !_speaksFrench,
-                        yesStyle: false,
-                        onTap: () => setState(() => _speaksFrench = false),
-                      ),
-                    ),
-                  ],
-                ),
-              ],
-            ),
-          ),
-          Container(
-            width: 1,
-            height: 92,
-            margin: const EdgeInsets.symmetric(horizontal: 14),
-            color: kSettingsBorder,
-          ),
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                const Text(
-                  'Parlez-vous anglais ?',
-                  style: TextStyle(
-                    color: kSettingsText,
-                    fontSize: 16,
-                    fontWeight: FontWeight.w800,
-                  ),
-                ),
-                const SizedBox(height: 14),
-                Row(
-                  children: [
-                    Expanded(
-                      child: _binaryOption(
-                        label: 'Oui',
-                        selected: _speaksEnglish,
-                        yesStyle: true,
-                        onTap: () => setState(() => _speaksEnglish = true),
-                      ),
-                    ),
-                    const SizedBox(width: 10),
-                    Expanded(
-                      child: _binaryOption(
-                        label: 'Non',
-                        selected: !_speaksEnglish,
-                        yesStyle: false,
-                        onTap: () => setState(() => _speaksEnglish = false),
-                      ),
-                    ),
-                  ],
-                ),
-              ],
-            ),
-          ),
-        ],
       ),
     );
   }
@@ -1261,7 +1234,11 @@ class _SettingsScreenState extends State<SettingsScreen> {
                 label: 'Accepter',
                 selected: _privacyAccepted == true,
                 yesStyle: true,
-                onTap: () => setState(() => _privacyAccepted = true),
+                onTap: () =>
+                    setState(() {
+                      _privacyAccepted = true;
+                      _privacyDirty = true;
+                    }),
               ),
             ),
             const SizedBox(width: 12),
@@ -1270,11 +1247,16 @@ class _SettingsScreenState extends State<SettingsScreen> {
                 label: 'Refuser',
                 selected: _privacyAccepted == false,
                 yesStyle: false,
-                onTap: () => setState(() => _privacyAccepted = false),
+                onTap: () =>
+                    setState(() {
+                      _privacyAccepted = false;
+                      _privacyDirty = true;
+                    }),
               ),
             ),
           ],
         ),
+        if (_privacyDirty) _buildSectionSaveButton(_savePrivacy),
       ],
     );
   }
@@ -1338,13 +1320,17 @@ class _SettingsScreenState extends State<SettingsScreen> {
           _questionRow(
             question: 'Avez-vous ete refere par un employe existant ?',
             value: _referredByEmployee,
-            onChanged: (value) => setState(() => _referredByEmployee = value),
+            onChanged: (value) => setState(() {
+              _referredByEmployee = value;
+              _eligibilityDirty = true;
+            }),
           ),
           if (_referredByEmployee == true) ...[
             const SizedBox(height: 6),
             TextField(
               controller: _referralEmployeeIdCtrl,
               style: const TextStyle(color: kSettingsText),
+              onChanged: (_) => setState(() => _eligibilityDirty = true),
               decoration: InputDecoration(
                 hintText: "Numero d'employe du referent",
                 hintStyle: const TextStyle(color: kSettingsMuted),
@@ -1376,67 +1362,31 @@ class _SettingsScreenState extends State<SettingsScreen> {
           _questionRow(
             question: 'Etes-vous legalement autorise a travailler au Canada ?',
             value: _authorizedToWorkCanada,
-            onChanged: (value) =>
-                setState(() => _authorizedToWorkCanada = value),
+            onChanged: (value) => setState(() {
+              _authorizedToWorkCanada = value;
+              _eligibilityDirty = true;
+            }),
           ),
           const Divider(color: kSettingsBorder, height: 22),
           _questionRow(
             question: "Ce poste exige l'age legal (18 ans ou plus) ?",
             value: _isAdult,
-            onChanged: (value) => setState(() => _isAdult = value),
+            onChanged: (value) => setState(() {
+              _isAdult = value;
+              _eligibilityDirty = true;
+            }),
           ),
           const Divider(color: kSettingsBorder, height: 22),
           _questionRow(
             question: "Ce poste exige l'absence d'antecedents criminels ?",
             value: _noCriminalRecord,
-            onChanged: (value) => setState(() => _noCriminalRecord = value),
+            onChanged: (value) => setState(() {
+              _noCriminalRecord = value;
+              _eligibilityDirty = true;
+            }),
           ),
+          if (_eligibilityDirty) _buildSectionSaveButton(_saveEligibility),
         ],
-      ),
-    );
-  }
-
-  Widget _buildSaveButton() {
-    return DecoratedBox(
-      decoration: BoxDecoration(
-        gradient: const LinearGradient(
-          colors: [kSettingsBlue, kSettingsDeepBlue],
-          begin: Alignment.centerLeft,
-          end: Alignment.centerRight,
-        ),
-        borderRadius: BorderRadius.circular(22),
-        boxShadow: const [
-          BoxShadow(
-            color: Color(0x260F63FF),
-            blurRadius: 20,
-            offset: Offset(0, 10),
-          ),
-        ],
-      ),
-      child: ElevatedButton.icon(
-        onPressed: _isLoading ? null : _saveAll,
-        icon: _isLoading
-            ? const SizedBox(
-                width: 18,
-                height: 18,
-                child: CircularProgressIndicator(
-                  strokeWidth: 2.2,
-                  color: Colors.white,
-                ),
-              )
-            : const Icon(LucideIcons.save, size: 18),
-        label: const Text('Enregistrer les modifications'),
-        style: ElevatedButton.styleFrom(
-          backgroundColor: Colors.transparent,
-          shadowColor: Colors.transparent,
-          disabledBackgroundColor: Colors.transparent,
-          foregroundColor: Colors.white,
-          minimumSize: const Size.fromHeight(60),
-          shape: RoundedRectangleBorder(
-            borderRadius: BorderRadius.circular(22),
-          ),
-          textStyle: const TextStyle(fontSize: 16, fontWeight: FontWeight.w800),
-        ),
       ),
     );
   }
@@ -1468,14 +1418,6 @@ class _SettingsScreenState extends State<SettingsScreen> {
             ),
             const SizedBox(height: 14),
             _sectionShell(
-              id: 'languages',
-              icon: LucideIcons.globe,
-              title: 'Preferences linguistiques',
-              subtitle: 'Definissez vos langues de communication',
-              child: _buildLanguagesSection(),
-            ),
-            const SizedBox(height: 14),
-            _sectionShell(
               id: 'privacy',
               icon: LucideIcons.shieldCheck,
               title: 'Confidentialite',
@@ -1490,8 +1432,6 @@ class _SettingsScreenState extends State<SettingsScreen> {
               subtitle: "Repondez aux questions d'admissibilite",
               child: _buildEligibilitySection(),
             ),
-            const SizedBox(height: 16),
-            _buildSaveButton(),
           ],
         ),
       ),

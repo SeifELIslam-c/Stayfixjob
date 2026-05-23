@@ -1,5 +1,6 @@
 import 'dart:io';
 import 'package:flutter/material.dart';
+import 'package:image_cropper/image_cropper.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 import 'package:video_player/video_player.dart';
@@ -29,6 +30,7 @@ class AddWorkerStoryScreen extends StatefulWidget {
 class _AddWorkerStoryScreenState extends State<AddWorkerStoryScreen> {
   final _storyService = StoryService();
   final _captionCtrl = TextEditingController();
+  final _textController = TextEditingController();
   final _picker = ImagePicker();
 
   File? _selectedMedia;
@@ -36,6 +38,10 @@ class _AddWorkerStoryScreenState extends State<AddWorkerStoryScreen> {
   double? _aspectRatio;
   VideoPlayerController? _videoCtrl;
   bool _videoReady = false;
+
+  String _overlayText = '';
+  Offset _textOffset = const Offset(0.5, 0.4);
+  bool _editingText = false;
 
   late String _selectedSpecialty;
   String _visibility = _kVisibilityOptions.first;
@@ -53,6 +59,7 @@ class _AddWorkerStoryScreenState extends State<AddWorkerStoryScreen> {
   @override
   void dispose() {
     _captionCtrl.dispose();
+    _textController.dispose();
     _videoCtrl?.dispose();
     super.dispose();
   }
@@ -157,6 +164,9 @@ class _AddWorkerStoryScreenState extends State<AddWorkerStoryScreen> {
         onProgress: (p) {
           if (mounted) setState(() => _uploadProgress = p);
         },
+        overlayText: _overlayText,
+        overlayTextX: _textOffset.dx,
+        overlayTextY: _textOffset.dy,
       );
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
@@ -337,6 +347,98 @@ class _AddWorkerStoryScreenState extends State<AddWorkerStoryScreen> {
               ],
             ),
           ),
+          // Draggable overlay text
+          if (_overlayText.isNotEmpty && !_editingText)
+            Positioned(
+              left: (_textOffset.dx * MediaQuery.of(context).size.width) - 50,
+              top: (_textOffset.dy * MediaQuery.of(context).size.height) - 20,
+              child: GestureDetector(
+                onTap: () => setState(() {
+                  _textController.text = _overlayText;
+                  _editingText = true;
+                }),
+                onPanUpdate: (d) => setState(() {
+                  final w = MediaQuery.of(context).size.width;
+                  final h = MediaQuery.of(context).size.height;
+                  _textOffset = Offset(
+                    (_textOffset.dx + d.delta.dx / w).clamp(0.1, 0.9),
+                    (_textOffset.dy + d.delta.dy / h).clamp(0.1, 0.9),
+                  );
+                }),
+                child: Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+                  decoration: BoxDecoration(
+                    color: Colors.black54,
+                    borderRadius: BorderRadius.circular(10),
+                  ),
+                  child: Text(
+                    _overlayText,
+                    style: const TextStyle(
+                      color: Colors.white,
+                      fontSize: 24,
+                      fontWeight: FontWeight.bold,
+                    ),
+                    textAlign: TextAlign.center,
+                  ),
+                ),
+              ),
+            ),
+          // Text editor overlay
+          if (_editingText)
+            Container(
+              color: Colors.black.withValues(alpha: 0.8),
+              child: Stack(
+                children: [
+                  Center(
+                    child: Padding(
+                      padding: const EdgeInsets.symmetric(horizontal: 24),
+                      child: TextField(
+                        controller: _textController,
+                        autofocus: true,
+                        maxLines: null,
+                        textAlign: TextAlign.center,
+                        cursorColor: Colors.white,
+                        style: const TextStyle(
+                          color: Colors.white,
+                          fontSize: 24,
+                          fontWeight: FontWeight.bold,
+                        ),
+                        decoration: const InputDecoration(
+                          border: InputBorder.none,
+                          hintText: 'Tapez votre texte...',
+                          hintStyle: TextStyle(color: Colors.white54),
+                        ),
+                      ),
+                    ),
+                  ),
+                  Positioned(
+                    top: MediaQuery.of(context).padding.top + 12,
+                    right: 16,
+                    child: GestureDetector(
+                      onTap: () => setState(() {
+                        _overlayText = _textController.text.trim();
+                        _editingText = false;
+                      }),
+                      child: Container(
+                        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+                        decoration: BoxDecoration(
+                          color: const Color(0xFF0F63FF),
+                          borderRadius: BorderRadius.circular(20),
+                        ),
+                        child: const Text(
+                          'Terminé',
+                          style: TextStyle(
+                            color: Colors.white,
+                            fontWeight: FontWeight.w700,
+                            fontSize: 14,
+                          ),
+                        ),
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ),
         ],
       ),
     );
@@ -417,6 +519,7 @@ class _AddWorkerStoryScreenState extends State<AddWorkerStoryScreen> {
   }
 
   Widget _buildRightTools() {
+    if (_selectedMedia == null) return const SizedBox.shrink();
     return Align(
       alignment: Alignment.centerRight,
       child: Padding(
@@ -424,13 +527,37 @@ class _AddWorkerStoryScreenState extends State<AddWorkerStoryScreen> {
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            _storyToolBtn(icon: LucideIcons.type, label: 'Texte', onTap: () {}),
-            const SizedBox(height: 12),
             _storyToolBtn(
-              icon: LucideIcons.crop,
-              label: 'Recadrer',
-              onTap: () {},
+              icon: LucideIcons.type,
+              label: 'Texte',
+              onTap: () => setState(() => _editingText = true),
             ),
+            if (_mediaType == 'image') ...[
+              const SizedBox(height: 12),
+              _storyToolBtn(
+                icon: LucideIcons.crop,
+                label: 'Recadrer',
+                onTap: () async {
+                  if (_selectedMedia == null || _mediaType != 'image') return;
+                  final cropped = await ImageCropper().cropImage(
+                    sourcePath: _selectedMedia!.path,
+                    uiSettings: [
+                      AndroidUiSettings(
+                        toolbarTitle: 'Recadrer',
+                        toolbarColor: const Color(0xFF0F63FF),
+                        toolbarWidgetColor: Colors.white,
+                        initAspectRatio: CropAspectRatioPreset.original,
+                        lockAspectRatio: false,
+                      ),
+                      IOSUiSettings(title: 'Recadrer'),
+                    ],
+                  );
+                  if (cropped != null && mounted) {
+                    setState(() => _selectedMedia = File(cropped.path));
+                  }
+                },
+              ),
+            ],
           ],
         ),
       ),

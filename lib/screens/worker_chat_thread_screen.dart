@@ -2492,69 +2492,65 @@ class _AudioBubbleRow extends StatelessWidget {
           ),
         ),
         const SizedBox(width: 10),
-        Expanded(
-          child: LayoutBuilder(
-            builder: (context, constraints) {
-              return GestureDetector(
-                behavior: HitTestBehavior.translucent,
-                onTapDown: onSeek == null
-                    ? null
-                    : (details) {
-                        final width = constraints.maxWidth;
-                        if (width <= 0) return;
-                        onSeek!(details.localPosition.dx / width);
-                      },
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    SizedBox(
-                      height: 28,
-                      child: Row(
-                        children: [
-                          for (var i = 0; i < bars.length; i++) ...[
-                            Expanded(
-                              child: Align(
-                                alignment: Alignment.center,
-                                child: AnimatedContainer(
-                                  duration: const Duration(milliseconds: 140),
-                                  width: 3.0,
-                                  height: bars[i].toDouble().clamp(8, 28),
-                                  decoration: BoxDecoration(
-                                    color: (i / bars.length) <= progress
-                                        ? accent
-                                        : foreground.withValues(alpha: 0.22),
-                                    borderRadius: BorderRadius.circular(999),
-                                  ),
-                                ),
+        SizedBox(
+          width: 160,
+          child: GestureDetector(
+            behavior: HitTestBehavior.translucent,
+            onTapDown: onSeek == null
+                ? null
+                : (details) {
+                    const width = 160.0;
+                    onSeek!(details.localPosition.dx / width);
+                  },
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                SizedBox(
+                  height: 28,
+                  child: Row(
+                    children: [
+                      for (var i = 0; i < bars.length; i++) ...[
+                        Expanded(
+                          child: Align(
+                            alignment: Alignment.center,
+                            child: AnimatedContainer(
+                              duration: const Duration(milliseconds: 140),
+                              width: 3.0,
+                              height: bars[i].toDouble().clamp(8, 28),
+                              decoration: BoxDecoration(
+                                color: (i / bars.length) <= progress
+                                    ? accent
+                                    : foreground.withValues(alpha: 0.22),
+                                borderRadius: BorderRadius.circular(999),
                               ),
                             ),
-                            if (i != bars.length - 1) const SizedBox(width: 2),
-                          ],
-                        ],
-                      ),
-                    ),
-                    const SizedBox(height: 6),
-                    Container(
-                      height: 3,
-                      decoration: BoxDecoration(
-                        color: foreground.withValues(alpha: 0.12),
-                        borderRadius: BorderRadius.circular(999),
-                      ),
-                      child: FractionallySizedBox(
-                        alignment: Alignment.centerLeft,
-                        widthFactor: progress,
-                        child: Container(
-                          decoration: BoxDecoration(
-                            color: accent,
-                            borderRadius: BorderRadius.circular(999),
                           ),
                         ),
+                        if (i != bars.length - 1) const SizedBox(width: 2),
+                      ],
+                    ],
+                  ),
+                ),
+                const SizedBox(height: 6),
+                Container(
+                  height: 3,
+                  decoration: BoxDecoration(
+                    color: foreground.withValues(alpha: 0.12),
+                    borderRadius: BorderRadius.circular(999),
+                  ),
+                  child: FractionallySizedBox(
+                    alignment: Alignment.centerLeft,
+                    widthFactor: progress,
+                    child: Container(
+                      decoration: BoxDecoration(
+                        color: accent,
+                        borderRadius: BorderRadius.circular(999),
                       ),
                     ),
-                  ],
+                  ),
                 ),
-              );
-            },
+              ],
+            ),
           ),
         ),
         const SizedBox(width: 10),

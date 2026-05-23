@@ -15,9 +15,9 @@ import '../utils/profile_formatters.dart';
 import '../widgets/address_picker.dart';
 import '../widgets/cv_preview_carousel.dart';
 import '../widgets/premium_bottom_sheets.dart';
-import 'availability_screen.dart';
 import 'cv_privacy_screen.dart';
 import 'home_screen.dart';
+import 'intervenant_profile_screen.dart';
 
 const kProfileBlue = Color(0xFF0F63FF);
 const kProfileDeepBlue = Color(0xFF2563EB);
@@ -3396,7 +3396,23 @@ class _ProfileScreenState extends State<ProfileScreen> {
             ],
           ),
           const SizedBox(height: 14),
-          CvPreviewCarousel(cvBase64: _cvBase64!, cvFileName: _cvFileName!),
+          Container(
+            decoration: BoxDecoration(
+              borderRadius: BorderRadius.circular(16),
+              boxShadow: const [
+                BoxShadow(
+                  color: Color(0x140F63FF),
+                  blurRadius: 18,
+                  offset: Offset(0, 6),
+                ),
+              ],
+            ),
+            child: ClipRRect(
+              borderRadius: BorderRadius.circular(16),
+              child: CvPreviewCarousel(
+                  cvBase64: _cvBase64!, cvFileName: _cvFileName!),
+            ),
+          ),
         ],
       );
     }
@@ -3934,7 +3950,9 @@ class _ProfileScreenState extends State<ProfileScreen> {
           child: OutlinedButton.icon(
             onPressed: () => Navigator.push(
               context,
-              MaterialPageRoute(builder: (_) => const AvailabilityScreen()),
+              MaterialPageRoute(
+                builder: (_) => const ProfileScreen(completionMode: true),
+              ),
             ).then((_) => _loadData()),
             icon: const Icon(LucideIcons.calendarRange, size: 18),
             label: const Text('Gerer la disponibilite'),
@@ -4140,10 +4158,19 @@ class _ProfileScreenState extends State<ProfileScreen> {
 
   Widget _buildApercuButton() {
     return GestureDetector(
-      onTap: null, // routing will be added later
+      onTap: () {
+        final uid = FirebaseAuth.instance.currentUser?.uid;
+        if (uid == null) return;
+        Navigator.push(
+          context,
+          MaterialPageRoute(
+            builder: (_) => IntervenantProfileScreen(workerId: uid),
+          ),
+        );
+      },
       child: Container(
         width: double.infinity,
-        padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 28),
+        padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 36),
         decoration: BoxDecoration(
           gradient: const LinearGradient(
             colors: [Color(0xFF0F63FF), Color(0xFF1C4FCE)],
