@@ -41,9 +41,12 @@ class _SettingsScreenState extends State<SettingsScreen> {
 
   bool _isLoading = true;
   bool _accountDirty = false;
+  bool _languagesDirty = false;
   bool _coordonneesDirty = false;
   bool _privacyDirty = false;
   bool _eligibilityDirty = false;
+  bool _speaksFrench = false;
+  bool _speaksEnglish = false;
   bool? _privacyAccepted;
   bool? _referredByEmployee;
   bool? _authorizedToWorkCanada;
@@ -112,6 +115,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
           _noCriminalRecord = questionnaire['noCriminalRecord'] as bool?;
           _referralEmployeeIdCtrl.text =
               questionnaire['referralEmployeeId'] ?? '';
+          _speaksFrench = data['speaksFrench'] as bool? ?? false;
+          _speaksEnglish = data['speaksEnglish'] as bool? ?? false;
         });
       }
       if (mounted) {
@@ -205,6 +210,35 @@ class _SettingsScreenState extends State<SettingsScreen> {
           content: Text('Erreur: ${e.toString()}'),
           backgroundColor: Colors.red,
         ),
+      );
+    } finally {
+      if (mounted) setState(() => _isLoading = false);
+    }
+  }
+
+  Future<void> _saveLanguages() async {
+    if (mounted) setState(() => _isLoading = true);
+    try {
+      final user = FirebaseAuth.instance.currentUser!;
+      await FirebaseFirestore.instance
+          .collection('profiles')
+          .doc(user.uid)
+          .update({
+        'speaksFrench': _speaksFrench,
+        'speaksEnglish': _speaksEnglish,
+      });
+      if (!mounted) return;
+      setState(() => _languagesDirty = false);
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Langues sauvegardees avec succes !'),
+          backgroundColor: Colors.green,
+        ),
+      );
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Erreur: ${e.toString()}'), backgroundColor: Colors.red),
       );
     } finally {
       if (mounted) setState(() => _isLoading = false);
@@ -1085,6 +1119,80 @@ class _SettingsScreenState extends State<SettingsScreen> {
     );
   }
 
+  Widget _languageTile({
+    required String flag,
+    required String label,
+    required bool value,
+    required ValueChanged<bool> onChanged,
+  }) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(20),
+        border: Border.all(color: kSettingsBorder),
+      ),
+      child: Row(
+        children: [
+          Container(
+            width: 44,
+            height: 44,
+            decoration: const BoxDecoration(
+              color: kSettingsLightBlue,
+              shape: BoxShape.circle,
+            ),
+            child: Center(
+              child: Text(flag, style: const TextStyle(fontSize: 22)),
+            ),
+          ),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Text(
+              label,
+              style: const TextStyle(
+                color: kSettingsText,
+                fontSize: 16,
+                fontWeight: FontWeight.w800,
+              ),
+            ),
+          ),
+          CupertinoSwitch(
+            value: value,
+            activeTrackColor: kSettingsBlue,
+            onChanged: onChanged,
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildLanguagesSection() {
+    return Column(
+      children: [
+        _languageTile(
+          flag: '🇫🇷',
+          label: 'Français',
+          value: _speaksFrench,
+          onChanged: (v) => setState(() {
+            _speaksFrench = v;
+            _languagesDirty = true;
+          }),
+        ),
+        const SizedBox(height: 12),
+        _languageTile(
+          flag: '🇬🇧',
+          label: 'Anglais',
+          value: _speaksEnglish,
+          onChanged: (v) => setState(() {
+            _speaksEnglish = v;
+            _languagesDirty = true;
+          }),
+        ),
+        if (_languagesDirty) _buildSectionSaveButton(_saveLanguages),
+      ],
+    );
+  }
+
   Widget _buildCoordonneesSection() {
     return Column(
       children: [
@@ -1407,6 +1515,14 @@ class _SettingsScreenState extends State<SettingsScreen> {
               title: 'Compte',
               subtitle: 'Gerez vos informations de compte',
               child: _buildAccountSection(),
+            ),
+            const SizedBox(height: 14),
+            _sectionShell(
+              id: 'languages',
+              icon: LucideIcons.globe,
+              title: 'Preference linguistique',
+              subtitle: 'Langues parlees et comprises',
+              child: _buildLanguagesSection(),
             ),
             const SizedBox(height: 14),
             _sectionShell(
