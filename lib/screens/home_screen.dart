@@ -10,6 +10,7 @@ import 'package:flutter_animate/flutter_animate.dart';
 import 'package:intl/intl.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:video_player/video_player.dart';
 
 import 'absence_screen.dart';
 import 'auth_screen.dart';
@@ -359,8 +360,6 @@ class _HomeScreenState extends State<HomeScreen> {
                     _buildSuggestionChip(LucideIcons.camera, 'Ajoutez une photo de profil'),
                     const SizedBox(height: 8),
                     _buildSuggestionChip(LucideIcons.briefcase, 'Renseignez votre expérience'),
-                    const SizedBox(height: 8),
-                    _buildSuggestionChip(LucideIcons.bell, 'Activez les notifications'),
                   ],
                 ),
               ),
@@ -1636,6 +1635,8 @@ class _WorkerStoryViewerScreenState extends State<_WorkerStoryViewerScreen>
     with SingleTickerProviderStateMixin {
   late final AnimationController _progress;
   bool _isDeleting = false;
+  VideoPlayerController? _videoCtrl;
+  bool _videoReady = false;
 
   @override
   void initState() {
@@ -1643,12 +1644,29 @@ class _WorkerStoryViewerScreenState extends State<_WorkerStoryViewerScreen>
     _progress = AnimationController(
       vsync: this,
       duration: const Duration(seconds: 6),
-    )..forward();
+    );
     _progress.addStatusListener((status) {
       if (status == AnimationStatus.completed && mounted) {
         Navigator.pop(context);
       }
     });
+
+    if (widget.story.isVideo) {
+      _videoCtrl = VideoPlayerController.networkUrl(
+        Uri.parse(widget.story.mediaUrl),
+      )..initialize().then((_) {
+          if (!mounted) return;
+          final dur = _videoCtrl!.value.duration;
+          _progress.duration =
+              dur.inMilliseconds > 0 ? dur : const Duration(seconds: 15);
+          setState(() => _videoReady = true);
+          _videoCtrl!.play();
+          _progress.forward();
+        });
+    } else {
+      _progress.forward();
+    }
+
     widget.storyService.recordStoryView(
       storyId: widget.story.id,
       ownerUid: widget.story.ownerUid,
@@ -1657,6 +1675,7 @@ class _WorkerStoryViewerScreenState extends State<_WorkerStoryViewerScreen>
 
   @override
   void dispose() {
+    _videoCtrl?.dispose();
     _progress.dispose();
     super.dispose();
   }
@@ -1835,35 +1854,36 @@ class _WorkerStoryViewerScreenState extends State<_WorkerStoryViewerScreen>
     return Scaffold(
       backgroundColor: Colors.black,
       body: GestureDetector(
-        onTapDown: (_) => _progress.stop(),
-        onTapUp: (_) => _progress.forward(),
-        onTapCancel: () => _progress.forward(),
+        onTapDown: (_) {
+          _progress.stop();
+          _videoCtrl?.pause();
+        },
+        onTapUp: (_) {
+          _progress.forward();
+          _videoCtrl?.play();
+        },
+        onTapCancel: () {
+          _progress.forward();
+          _videoCtrl?.play();
+        },
         child: Stack(
           fit: StackFit.expand,
           children: [
             // ── Media ────────────────────────────────────────────────────────
             story.isVideo
-                ? const Center(
-                    child: Column(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        Icon(
-                          LucideIcons.playCircle,
+                ? _videoReady && _videoCtrl != null
+                    ? Center(
+                        child: AspectRatio(
+                          aspectRatio: _videoCtrl!.value.aspectRatio,
+                          child: VideoPlayer(_videoCtrl!),
+                        ),
+                      )
+                    : const Center(
+                        child: CircularProgressIndicator(
                           color: Colors.white54,
-                          size: 64,
+                          strokeWidth: 2,
                         ),
-                        SizedBox(height: 14),
-                        Text(
-                          'Story vidéo',
-                          style: TextStyle(
-                            color: Colors.white54,
-                            fontSize: 16,
-                            fontWeight: FontWeight.w700,
-                          ),
-                        ),
-                      ],
-                    ),
-                  )
+                      )
                 : Image.network(
                     story.mediaUrl,
                     fit: BoxFit.contain,

@@ -282,7 +282,6 @@ class _IntervenantProfileScreenState extends State<IntervenantProfileScreen> {
         specialties.isNotEmpty && !_isQualifiedLaborDepartment(department);
     final expYears = (data['departmentExperienceYears'] as num?)?.toInt();
     final address = ((data['address'] as String?)?.trim()) ?? '';
-    final isAvailable = _isWorkerAvailableNow(data);
     final photoBase64 = (data['photoBase64'] as String?)?.trim();
     final photoUrl = VpsMediaService.resolveProfileImageUrl(data);
     final photoBytes = _decodeBase64(photoBase64);
@@ -323,7 +322,6 @@ class _IntervenantProfileScreenState extends State<IntervenantProfileScreen> {
             initials: initials,
             onBack: () => Navigator.pop(context),
             onChat: () {},
-            onBell: () => _showSnack('Aucune notification pour le moment.'),
           ),
         ),
         SliverToBoxAdapter(
@@ -345,7 +343,7 @@ class _IntervenantProfileScreenState extends State<IntervenantProfileScreen> {
             padding: const EdgeInsets.symmetric(horizontal: 16),
             child: Align(
               alignment: Alignment.centerLeft,
-              child: _AvailabilityBadge(isAvailable: isAvailable),
+              child: const _AvailabilityBadge(),
             ),
           ),
         ),
@@ -514,7 +512,6 @@ class _ProfileHeroSection extends StatelessWidget {
     required this.initials,
     required this.onBack,
     required this.onChat,
-    required this.onBell,
   });
 
   final String name;
@@ -527,7 +524,6 @@ class _ProfileHeroSection extends StatelessWidget {
   final String initials;
   final VoidCallback onBack;
   final VoidCallback onChat;
-  final VoidCallback onBell;
 
   @override
   Widget build(BuildContext context) {
@@ -537,7 +533,7 @@ class _ProfileHeroSection extends StatelessWidget {
         fit: StackFit.expand,
         children: [
           Image.asset(
-            'assets/interventfilterheroimg.webp',
+            'lib/assets/interventfilterheroimg.webp',
             fit: BoxFit.cover,
             errorBuilder: (_, __, ___) =>
                 const ColoredBox(color: Color(0xFF0A0A0A)),
@@ -578,24 +574,7 @@ class _ProfileHeroSection extends StatelessWidget {
                         ),
                       ),
                       const Spacer(),
-                      Stack(
-                        clipBehavior: Clip.none,
-                        children: [
-                          _CircleBtn(icon: LucideIcons.bell, onTap: onBell),
-                          Positioned(
-                            top: 5,
-                            right: 5,
-                            child: Container(
-                              width: 9,
-                              height: 9,
-                              decoration: const BoxDecoration(
-                                color: _kOrangeDot,
-                                shape: BoxShape.circle,
-                              ),
-                            ),
-                          ),
-                        ],
-                      ),
+                      const SizedBox(width: 42, height: 42),
                     ],
                   ),
                 ),
@@ -1827,13 +1806,12 @@ class _CircleBtn extends StatelessWidget {
 }
 
 class _AvailabilityBadge extends StatelessWidget {
-  const _AvailabilityBadge({required this.isAvailable});
-  final bool isAvailable;
+  const _AvailabilityBadge();
 
   @override
   Widget build(BuildContext context) {
-    final color = isAvailable ? _kProfGreen : Colors.grey;
-    final label = isAvailable ? 'Disponible' : 'Non disponible';
+    const color = _kProfGreen;
+    const label = 'Disponible';
 
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
