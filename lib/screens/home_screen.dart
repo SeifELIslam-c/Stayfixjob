@@ -319,7 +319,6 @@ class _HomeScreenState extends State<HomeScreen> {
           ],
         ),
         child: Column(
-          mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             Row(
@@ -345,17 +344,27 @@ class _HomeScreenState extends State<HomeScreen> {
               style: TextStyle(color: Color(0xFF13203F), fontSize: 14, fontWeight: FontWeight.w600, height: 1.45),
             ),
             const SizedBox(height: 16),
-            _buildSuggestionChip(LucideIcons.star, 'Complétez votre profil à 100%'),
-            const SizedBox(height: 8),
-            _buildSuggestionChip(LucideIcons.clock3, 'Mettez à jour vos disponibilités'),
-            const SizedBox(height: 8),
-            _buildSuggestionChip(LucideIcons.mapPin, 'Activez votre localisation'),
-            const SizedBox(height: 8),
-            _buildSuggestionChip(LucideIcons.camera, 'Ajoutez une photo de profil'),
-            const SizedBox(height: 8),
-            _buildSuggestionChip(LucideIcons.briefcase, 'Renseignez votre expérience'),
-            const SizedBox(height: 8),
-            _buildSuggestionChip(LucideIcons.bell, 'Activez les notifications'),
+            Flexible(
+              child: SingleChildScrollView(
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    _buildSuggestionChip(LucideIcons.star, 'Complétez votre profil à 100%'),
+                    const SizedBox(height: 8),
+                    _buildSuggestionChip(LucideIcons.clock3, 'Mettez à jour vos disponibilités'),
+                    const SizedBox(height: 8),
+                    _buildSuggestionChip(LucideIcons.mapPin, 'Activez votre localisation'),
+                    const SizedBox(height: 8),
+                    _buildSuggestionChip(LucideIcons.camera, 'Ajoutez une photo de profil'),
+                    const SizedBox(height: 8),
+                    _buildSuggestionChip(LucideIcons.briefcase, 'Renseignez votre expérience'),
+                    const SizedBox(height: 8),
+                    _buildSuggestionChip(LucideIcons.bell, 'Activez les notifications'),
+                  ],
+                ),
+              ),
+            ),
           ],
         ),
       );
