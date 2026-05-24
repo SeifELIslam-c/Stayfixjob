@@ -6,6 +6,7 @@ import 'dart:math';
 
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_svg/flutter_svg.dart';
 import 'package:google_sign_in/google_sign_in.dart';
@@ -69,6 +70,91 @@ class _AuthScreenState extends State<AuthScreen> {
       width: compact ? 18 : 20,
       height: compact ? 18 : 20,
     );
+  }
+
+  bool get _supportsAppleSignIn =>
+      !kIsWeb && (Platform.isIOS || Platform.isMacOS);
+
+  String _defaultProfileName({String fallback = 'Employe'}) {
+    final typedName = _nameController.text.trim();
+    if (typedName.isNotEmpty) return typedName;
+
+    final email = _emailController.text.trim();
+    if (email.contains('@')) {
+      final localPart = email.split('@').first.trim();
+      if (localPart.isNotEmpty) return localPart;
+    }
+
+    return fallback;
+  }
+
+  Future<void> _completeAuthenticatedUser(
+    UserCredential userCredential, {
+    String? profileName,
+    String? profileEmail,
+    String? profilePhone,
+  }) async {
+    final user = userCredential.user;
+    if (user == null) {
+      throw FirebaseAuthException(
+        code: 'null-user',
+        message: 'Aucun utilisateur Firebase n a ete retourne.',
+      );
+    }
+
+    final userId = user.uid;
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString('userId', userId);
+
+    final db = FirebaseFirestore.instance;
+    final docSnapshot = await db.collection('profiles').doc(userId).get();
+
+    if (!docSnapshot.exists) {
+      await db.collection('profiles').doc(userId).set({
+        'id': userId,
+        'username': (profileName ?? user.displayName ?? _defaultProfileName())
+            .trim(),
+        'email': (profileEmail ?? user.email ?? _emailController.text.trim())
+            .trim(),
+        'phone': (profilePhone ?? _phoneComplete).trim(),
+        'phoneNational': _phoneController.text.trim(),
+        'phoneCountryIso': _phoneCountryIso,
+        'phoneDialCode': _phoneDialCode,
+        'department': '',
+        'maintenanceType': '',
+        'specialties': [],
+        'createdAt': FieldValue.serverTimestamp(),
+      });
+
+      if (!mounted) return;
+      Navigator.pushReplacement(
+        context,
+        MaterialPageRoute(builder: (_) => const TermsScreen()),
+      );
+      return;
+    }
+
+    final data = docSnapshot.data()!;
+    final dept = data['department'] ?? '';
+    final termsAccepted = data['termsAccepted'] ?? false;
+
+    if (!mounted) return;
+    if (!termsAccepted) {
+      Navigator.pushReplacement(
+        context,
+        MaterialPageRoute(builder: (_) => const TermsScreen()),
+      );
+    } else if (dept.isEmpty) {
+      Navigator.pushReplacement(
+        context,
+        MaterialPageRoute(builder: (_) => const RoleSelectionScreen()),
+      );
+    } else {
+      Navigator.pushReplacement(
+        context,
+        MaterialPageRoute(builder: (_) => const HomeScreen(requireAuth: false)),
+      );
+    }
   }
 
   Future<void> _ensureGoogleAccountHasPassword(User user) async {
@@ -255,6 +341,7 @@ class _AuthScreenState extends State<AuthScreen> {
     setState(() => _isLoading = true);
     try {
       final googleSignIn = GoogleSignIn(scopes: const ['email']);
+      await googleSignIn.signOut();
       final googleAccount = await googleSignIn.signIn();
       if (googleAccount == null) {
         setState(() => _isLoading = false);
@@ -271,55 +358,63 @@ class _AuthScreenState extends State<AuthScreen> {
         credential,
       );
       await _ensureGoogleAccountHasPassword(userCredential.user!);
+      await _completeAuthenticatedUser(
+        userCredential,
+        profileName: userCredential.user?.displayName ?? _defaultProfileName(),
+        profileEmail:
+            userCredential.user?.email ?? _emailController.text.trim(),
+      );
       final userId = userCredential.user!.uid;
+      var skipLegacyGoogleBootstrap = DateTime.now().microsecond < 0;
+      if (skipLegacyGoogleBootstrap) {
+        final prefs = await SharedPreferences.getInstance();
+        await prefs.setString('userId', userId);
 
-      final prefs = await SharedPreferences.getInstance();
-      await prefs.setString('userId', userId);
+        final db = FirebaseFirestore.instance;
+        final docSnapshot = await db.collection('profiles').doc(userId).get();
 
-      final db = FirebaseFirestore.instance;
-      final docSnapshot = await db.collection('profiles').doc(userId).get();
+        if (!docSnapshot.exists) {
+          await db.collection('profiles').doc(userId).set({
+            'id': userId,
+            'username': userCredential.user?.displayName ?? 'Employé',
+            'email': userCredential.user?.email ?? '',
+            'phone': '',
+            'department': '',
+            'maintenanceType': '',
+            'specialties': [],
+            'createdAt': FieldValue.serverTimestamp(),
+          });
 
-      if (!docSnapshot.exists) {
-        await db.collection('profiles').doc(userId).set({
-          'id': userId,
-          'username': userCredential.user?.displayName ?? 'Employé',
-          'email': userCredential.user?.email ?? '',
-          'phone': '',
-          'department': '',
-          'maintenanceType': '',
-          'specialties': [],
-          'createdAt': FieldValue.serverTimestamp(),
-        });
-
-        if (mounted) {
-          Navigator.pushReplacement(
-            context,
-            MaterialPageRoute(builder: (_) => const TermsScreen()),
-          );
-        }
-      } else {
-        final data = docSnapshot.data()!;
-        final dept = data['department'] ?? '';
-        final termsAccepted = data['termsAccepted'] ?? false;
-
-        if (mounted) {
-          if (!termsAccepted) {
+          if (mounted) {
             Navigator.pushReplacement(
               context,
               MaterialPageRoute(builder: (_) => const TermsScreen()),
             );
-          } else if (dept.isEmpty) {
-            Navigator.pushReplacement(
-              context,
-              MaterialPageRoute(builder: (_) => const RoleSelectionScreen()),
-            );
-          } else {
-            Navigator.pushReplacement(
-              context,
-              MaterialPageRoute(
-                builder: (_) => const HomeScreen(requireAuth: false),
-              ),
-            );
+          }
+        } else {
+          final data = docSnapshot.data()!;
+          final dept = data['department'] ?? '';
+          final termsAccepted = data['termsAccepted'] ?? false;
+
+          if (mounted) {
+            if (!termsAccepted) {
+              Navigator.pushReplacement(
+                context,
+                MaterialPageRoute(builder: (_) => const TermsScreen()),
+              );
+            } else if (dept.isEmpty) {
+              Navigator.pushReplacement(
+                context,
+                MaterialPageRoute(builder: (_) => const RoleSelectionScreen()),
+              );
+            } else {
+              Navigator.pushReplacement(
+                context,
+                MaterialPageRoute(
+                  builder: (_) => const HomeScreen(requireAuth: false),
+                ),
+              );
+            }
           }
         }
       }
@@ -339,6 +434,52 @@ class _AuthScreenState extends State<AuthScreen> {
             : 'Erreur: $e';
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(content: Text(message), backgroundColor: Colors.redAccent),
+        );
+      }
+    } finally {
+      if (mounted) setState(() => _isLoading = false);
+    }
+  }
+
+  Future<void> _signInWithApple() async {
+    setState(() => _isLoading = true);
+    try {
+      final appleProvider = AppleAuthProvider()
+        ..addScope('email')
+        ..addScope('name');
+
+      final userCredential = await FirebaseAuth.instance.signInWithProvider(
+        appleProvider,
+      );
+
+      await _completeAuthenticatedUser(
+        userCredential,
+        profileName:
+            userCredential.user?.displayName ??
+            _defaultProfileName(fallback: 'Employe Apple'),
+        profileEmail:
+            userCredential.user?.email ?? _emailController.text.trim(),
+      );
+    } on FirebaseAuthException catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(
+              e.code == 'web-context-cancelled'
+                  ? 'Connexion Apple annulee.'
+                  : 'Erreur Sign in with Apple: ${e.message ?? e.code}',
+            ),
+            backgroundColor: Colors.redAccent,
+          ),
+        );
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Erreur Apple Sign-In: $e'),
+            backgroundColor: Colors.redAccent,
+          ),
         );
       }
     } finally {
@@ -628,6 +769,57 @@ class _AuthScreenState extends State<AuthScreen> {
   }
 
   @override
+  void dispose() {
+    _emailController.dispose();
+    _passwordController.dispose();
+    _confirmPasswordController.dispose();
+    _nameController.dispose();
+    _phoneController.dispose();
+    super.dispose();
+  }
+
+  Widget _buildSocialButton({
+    required String label,
+    required VoidCallback? onPressed,
+    required Widget icon,
+    required bool compact,
+    Color backgroundColor = Colors.white,
+    Color foregroundColor = const Color(0xFF13203F),
+    BorderSide side = const BorderSide(color: Color(0xFFD9E4F7)),
+  }) {
+    return SizedBox(
+      width: double.infinity,
+      height: compact ? 48 : 54,
+      child: OutlinedButton(
+        onPressed: onPressed,
+        style: OutlinedButton.styleFrom(
+          backgroundColor: backgroundColor,
+          foregroundColor: foregroundColor,
+          side: side,
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(18),
+          ),
+          padding: EdgeInsets.zero,
+        ),
+        child: Row(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            icon,
+            const SizedBox(width: 10),
+            Text(
+              label,
+              style: TextStyle(
+                fontSize: compact ? 13 : 14,
+                fontWeight: FontWeight.w600,
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  @override
   Widget build(BuildContext context) {
     if (_isRegisterMode) {
       return _buildRegisterScaffold();
@@ -669,38 +861,38 @@ class _AuthScreenState extends State<AuthScreen> {
               child: ConstrainedBox(
                 constraints: BoxConstraints(minHeight: constraints.maxHeight),
                 child: Column(
-                children: [
-                  _buildHero(
-                    heroHeight: heroHeight,
-                    heroBlue: heroBlue,
-                    heroBlueDark: heroBlueDark,
-                    cardBackground: cardBackground,
-                    bridgeHeight: 22,
-                  ),
-                  Container(
-                    width: double.infinity,
-                    transform: Matrix4.translationValues(0, -18, 0),
-                    decoration: const BoxDecoration(
-                      color: cardBackground,
-                      borderRadius: BorderRadius.vertical(
-                        top: Radius.circular(34),
-                      ),
-                      boxShadow: [
-                        BoxShadow(
-                          color: Color(0x140F63FF),
-                          blurRadius: 28,
-                          offset: Offset(0, -8),
-                        ),
-                      ],
+                  children: [
+                    _buildHero(
+                      heroHeight: heroHeight,
+                      heroBlue: heroBlue,
+                      heroBlueDark: heroBlueDark,
+                      cardBackground: cardBackground,
+                      bridgeHeight: 22,
                     ),
-                    child: Padding(
-                      padding: EdgeInsets.fromLTRB(
-                        horizontalPadding,
-                        topPadding,
-                        horizontalPadding,
-                        24,
+                    Container(
+                      width: double.infinity,
+                      transform: Matrix4.translationValues(0, -18, 0),
+                      decoration: const BoxDecoration(
+                        color: cardBackground,
+                        borderRadius: BorderRadius.vertical(
+                          top: Radius.circular(34),
+                        ),
+                        boxShadow: [
+                          BoxShadow(
+                            color: Color(0x140F63FF),
+                            blurRadius: 28,
+                            offset: Offset(0, -8),
+                          ),
+                        ],
                       ),
-                      child: Column(
+                      child: Padding(
+                        padding: EdgeInsets.fromLTRB(
+                          horizontalPadding,
+                          topPadding,
+                          horizontalPadding,
+                          24,
+                        ),
+                        child: Column(
                           crossAxisAlignment: CrossAxisAlignment.start,
                           children: [
                             Text(
@@ -917,40 +1109,27 @@ class _AuthScreenState extends State<AuthScreen> {
                               ],
                             ),
                             SizedBox(height: ultraCompact ? 10 : 16),
-                            SizedBox(
-                              width: double.infinity,
-                              height: ultraCompact ? 48 : 54,
-                              child: OutlinedButton(
-                                onPressed: _isLoading
-                                    ? null
-                                    : _signInWithGoogle,
-                                style: OutlinedButton.styleFrom(
-                                  backgroundColor: Colors.white,
-                                  foregroundColor: headingColor,
-                                  side: const BorderSide(
-                                    color: Color(0xFFD9E4F7),
-                                  ),
-                                  shape: RoundedRectangleBorder(
-                                    borderRadius: BorderRadius.circular(18),
-                                  ),
-                                  padding: EdgeInsets.zero,
-                                ),
-                                child: Row(
-                                  mainAxisAlignment: MainAxisAlignment.center,
-                                  children: [
-                                    _buildGoogleLogo(compact: ultraCompact),
-                                    const SizedBox(width: 10),
-                                    Text(
-                                      'Continuer avec Google',
-                                      style: TextStyle(
-                                        fontSize: ultraCompact ? 13 : 14,
-                                        fontWeight: FontWeight.w600,
-                                      ),
-                                    ),
-                                  ],
-                                ),
-                              ),
+                            _buildSocialButton(
+                              label: 'Continuer avec Google',
+                              onPressed: _isLoading ? null : _signInWithGoogle,
+                              icon: _buildGoogleLogo(compact: ultraCompact),
+                              compact: ultraCompact,
                             ),
+                            if (_supportsAppleSignIn) ...[
+                              SizedBox(height: ultraCompact ? 8 : 10),
+                              _buildSocialButton(
+                                label: 'Continuer avec Apple',
+                                onPressed: _isLoading ? null : _signInWithApple,
+                                icon: Icon(
+                                  Icons.apple,
+                                  size: ultraCompact ? 18 : 20,
+                                ),
+                                compact: ultraCompact,
+                                backgroundColor: const Color(0xFF111111),
+                                foregroundColor: Colors.white,
+                                side: BorderSide.none,
+                              ),
+                            ],
                             SizedBox(height: ultraCompact ? 4 : 8),
                             Center(
                               child: TextButton.icon(
@@ -1032,38 +1211,38 @@ class _AuthScreenState extends State<AuthScreen> {
               child: ConstrainedBox(
                 constraints: BoxConstraints(minHeight: constraints.maxHeight),
                 child: Column(
-                children: [
-                  _buildHero(
-                    heroHeight: heroHeight,
-                    heroBlue: heroBlue,
-                    heroBlueDark: heroBlueDark,
-                    cardBackground: cardBackground,
-                    bridgeHeight: 22,
-                  ),
-                  Container(
-                    width: double.infinity,
-                    transform: Matrix4.translationValues(0, -18, 0),
-                    decoration: const BoxDecoration(
-                      color: cardBackground,
-                      borderRadius: BorderRadius.vertical(
-                        top: Radius.circular(34),
-                      ),
-                      boxShadow: [
-                        BoxShadow(
-                          color: Color(0x140F63FF),
-                          blurRadius: 28,
-                          offset: Offset(0, -8),
-                        ),
-                      ],
+                  children: [
+                    _buildHero(
+                      heroHeight: heroHeight,
+                      heroBlue: heroBlue,
+                      heroBlueDark: heroBlueDark,
+                      cardBackground: cardBackground,
+                      bridgeHeight: 22,
                     ),
-                    child: Padding(
-                      padding: EdgeInsets.fromLTRB(
-                        horizontalPadding,
-                        topPadding,
-                        horizontalPadding,
-                        bottomPadding + 24,
+                    Container(
+                      width: double.infinity,
+                      transform: Matrix4.translationValues(0, -18, 0),
+                      decoration: const BoxDecoration(
+                        color: cardBackground,
+                        borderRadius: BorderRadius.vertical(
+                          top: Radius.circular(34),
+                        ),
+                        boxShadow: [
+                          BoxShadow(
+                            color: Color(0x140F63FF),
+                            blurRadius: 28,
+                            offset: Offset(0, -8),
+                          ),
+                        ],
                       ),
-                      child: Column(
+                      child: Padding(
+                        padding: EdgeInsets.fromLTRB(
+                          horizontalPadding,
+                          topPadding,
+                          horizontalPadding,
+                          bottomPadding + 24,
+                        ),
+                        child: Column(
                           crossAxisAlignment: CrossAxisAlignment.start,
                           children: [
                             Text(
@@ -1265,40 +1444,27 @@ class _AuthScreenState extends State<AuthScreen> {
                               ],
                             ),
                             SizedBox(height: ultraCompact ? 8 : 12),
-                            SizedBox(
-                              width: double.infinity,
-                              height: ultraCompact ? 48 : 54,
-                              child: OutlinedButton(
-                                onPressed: _isLoading
-                                    ? null
-                                    : _signInWithGoogle,
-                                style: OutlinedButton.styleFrom(
-                                  backgroundColor: Colors.white,
-                                  foregroundColor: headingColor,
-                                  side: const BorderSide(
-                                    color: Color(0xFFD9E4F7),
-                                  ),
-                                  shape: RoundedRectangleBorder(
-                                    borderRadius: BorderRadius.circular(18),
-                                  ),
-                                  padding: EdgeInsets.zero,
-                                ),
-                                child: Row(
-                                  mainAxisAlignment: MainAxisAlignment.center,
-                                  children: [
-                                    _buildGoogleLogo(compact: ultraCompact),
-                                    const SizedBox(width: 10),
-                                    Text(
-                                      'Continuer avec Google',
-                                      style: TextStyle(
-                                        fontSize: ultraCompact ? 13 : 14,
-                                        fontWeight: FontWeight.w600,
-                                      ),
-                                    ),
-                                  ],
-                                ),
-                              ),
+                            _buildSocialButton(
+                              label: 'Continuer avec Google',
+                              onPressed: _isLoading ? null : _signInWithGoogle,
+                              icon: _buildGoogleLogo(compact: ultraCompact),
+                              compact: ultraCompact,
                             ),
+                            if (_supportsAppleSignIn) ...[
+                              SizedBox(height: ultraCompact ? 8 : 10),
+                              _buildSocialButton(
+                                label: 'Continuer avec Apple',
+                                onPressed: _isLoading ? null : _signInWithApple,
+                                icon: Icon(
+                                  Icons.apple,
+                                  size: ultraCompact ? 18 : 20,
+                                ),
+                                compact: ultraCompact,
+                                backgroundColor: const Color(0xFF111111),
+                                foregroundColor: Colors.white,
+                                side: BorderSide.none,
+                              ),
+                            ],
                             SizedBox(height: ultraCompact ? 2 : 6),
                             Center(
                               child: TextButton(
