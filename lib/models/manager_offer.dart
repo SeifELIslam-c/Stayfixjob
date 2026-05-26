@@ -36,6 +36,10 @@ class ManagerOffer {
     this.longitude,
     this.managerPhotoUrl,
     this.condoImageUrl,
+    this.targetApp,
+    this.createdByRole,
+    this.apartmentId,
+    this.apartmentName,
   });
 
   final String id;
@@ -66,6 +70,10 @@ class ManagerOffer {
   final DateTime? updatedAt;
   final double? latitude;
   final double? longitude;
+  final String? targetApp;
+  final String? createdByRole;
+  final String? apartmentId;
+  final String? apartmentName;
 
   bool get isUrgent =>
       urgency == OfferUrgency.urgent || urgency == OfferUrgency.veryUrgent;
@@ -109,6 +117,10 @@ class ManagerOffer {
       longitude:
           (data['condoLongitude'] as num?)?.toDouble() ??
           (data['longitude'] as num?)?.toDouble(),
+      targetApp: data['targetApp'] as String?,
+      createdByRole: data['createdByRole'] as String?,
+      apartmentId: data['apartmentId'] as String?,
+      apartmentName: data['apartmentName'] as String?,
     );
   }
 

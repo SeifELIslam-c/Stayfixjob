@@ -11,8 +11,10 @@ import 'package:lucide_icons_flutter/lucide_icons.dart';
 import 'package:open_file/open_file.dart';
 import 'package:path_provider/path_provider.dart';
 
+import '../services/vps_media_service.dart';
 import '../utils/profile_formatters.dart';
 import '../widgets/address_picker.dart';
+import '../widgets/app_pdf_viewer_page.dart';
 import '../widgets/cv_preview_carousel.dart';
 import '../widgets/premium_bottom_sheets.dart';
 import 'cv_privacy_screen.dart';
@@ -62,6 +64,7 @@ class _ProfileScreenState extends State<ProfileScreen> {
   String? _cvFileName;
   String? _cvBase64;
   String? _photoBase64;
+  String? _photoUrl;
   String _address = '';
   double? _addressLatitude;
   double? _addressLongitude;
@@ -72,7 +75,7 @@ class _ProfileScreenState extends State<ProfileScreen> {
   String _phoneDialCode = '';
   String _email = '';
 
-  // ── Poste actuel ──────────────────────────────────────────────────────────
+  //   Poste actuel
   String _jobLocation = '';
   String _jobAddress = '';
   String _jobStartDate = '';
@@ -91,6 +94,13 @@ class _ProfileScreenState extends State<ProfileScreen> {
   TimeOfDay _quickAvailabilityTo = const TimeOfDay(hour: 16, minute: 0);
   bool _didRunCompletionAutofocus = false;
   List<String> _pendingRoles = [];
+
+  // Scoped concierge account fields
+  bool _isConcierge = false;
+  String _stayfixBadgeLabel = '';
+  String _aptName = '';
+
+  bool get _isRoleEditingLocked => _isConcierge;
 
   // ignore: prefer_final_fields
   List<Map<String, dynamic>> _departmentsData = [
@@ -267,6 +277,42 @@ class _ProfileScreenState extends State<ProfileScreen> {
       result.add(specialty);
     }
     return result;
+  }
+
+  String _buildStayFixBadgeLabel() {
+    if (_isConcierge) {
+      return 'Concierge';
+    }
+    final department = _department.trim();
+    final specialty = _selectedSpecialties.isEmpty
+        ? ''
+        : _selectedSpecialties.first.trim();
+    if (department.isEmpty && specialty.isEmpty) {
+      return 'Concierge';
+    }
+    if (department.isEmpty) return specialty;
+    if (specialty.isEmpty) return department;
+    return '$department · $specialty';
+  }
+
+  Future<void> _syncStayFixBadgeLabel() async {
+    if (!_isConcierge) return;
+    final user = FirebaseAuth.instance.currentUser;
+    if (user == null) return;
+    final label = _buildStayFixBadgeLabel();
+    if (label == _stayfixBadgeLabel) return;
+    await FirebaseFirestore.instance.collection('profiles').doc(user.uid).set({
+      'stayfixBadgeLabel': label,
+    }, SetOptions(merge: true));
+    if (!mounted) return;
+    setState(() => _stayfixBadgeLabel = label);
+  }
+
+  void _showRoleLockedMessage() {
+    _showInfo(
+      'Le departement et le role StayFix sont verrouilles pour ce compte concierge.',
+      isError: true,
+    );
   }
 
   bool _hasAddress() => _address.trim().isNotEmpty;
@@ -446,6 +492,41 @@ class _ProfileScreenState extends State<ProfileScreen> {
 
         if (doc.exists && mounted) {
           final data = doc.data()!;
+          final authName = (user.displayName ?? '').trim();
+          final emailLocalPart = (user.email ?? '').split('@').first.trim();
+          final resolvedName =
+              ((data['username'] as String?)?.trim().isNotEmpty == true
+              ? (data['username'] as String).trim()
+              : ((data['name'] as String?)?.trim().isNotEmpty == true
+                    ? (data['name'] as String).trim()
+                    : (authName.isNotEmpty ? authName : emailLocalPart)));
+          final resolvedPhotoUrl =
+              VpsMediaService.resolveProfileImageUrl(data) ??
+              (user.photoURL?.trim().isNotEmpty == true
+                  ? user.photoURL!.trim()
+                  : null);
+          final backfillUpdates = <String, dynamic>{};
+          if (((data['username'] as String?)?.trim().isNotEmpty != true) &&
+              resolvedName.isNotEmpty) {
+            backfillUpdates['username'] = resolvedName;
+          }
+          if (((data['name'] as String?)?.trim().isNotEmpty != true) &&
+              resolvedName.isNotEmpty) {
+            backfillUpdates['name'] = resolvedName;
+          }
+          if (((data['workerName'] as String?)?.trim().isNotEmpty != true) &&
+              resolvedName.isNotEmpty) {
+            backfillUpdates['workerName'] = resolvedName;
+          }
+          if (resolvedPhotoUrl != null &&
+              resolvedPhotoUrl.isNotEmpty &&
+              VpsMediaService.resolveProfileImageUrl(data) == null) {
+            backfillUpdates['photoUrl'] = resolvedPhotoUrl;
+            backfillUpdates['photoURL'] = resolvedPhotoUrl;
+          }
+          if (backfillUpdates.isNotEmpty) {
+            await doc.reference.set(backfillUpdates, SetOptions(merge: true));
+          }
           final libreDaysRaw = data['libreDays'];
           final availabilitySlotsRaw = data['availabilitySlots'];
           final specialtyExperienceRaw = data['specialtyExperienceYears'];
@@ -462,21 +543,22 @@ class _ProfileScreenState extends State<ProfileScreen> {
             _cvFileName = data['cvFileName'];
             _cvBase64 = data['cvBase64'];
             _photoBase64 = data['photoBase64'];
+            _photoUrl = resolvedPhotoUrl;
             _address = data['address'] ?? '';
             _addressLatitude = (data['addressLatitude'] as num?)?.toDouble();
             _addressLongitude = (data['addressLongitude'] as num?)?.toDouble();
             _dob = data['dob'] ?? '';
-            _username = data['username'] ?? '';
+            _username = resolvedName;
             _phone = data['phone'] ?? '';
             _phoneCountryIso = data['phoneCountryIso'] ?? '';
             _phoneDialCode = data['phoneDialCode'] ?? '';
             _jobLocation = (data['jobLocation'] as String? ?? '').trim();
             _jobAddress = (data['jobAddress'] as String? ?? '').trim();
             _jobStartDate = (data['jobStartDate'] as String? ?? '').trim();
-            _jobAddressLatitude =
-                (data['jobAddressLatitude'] as num?)?.toDouble();
-            _jobAddressLongitude =
-                (data['jobAddressLongitude'] as num?)?.toDouble();
+            _jobAddressLatitude = (data['jobAddressLatitude'] as num?)
+                ?.toDouble();
+            _jobAddressLongitude = (data['jobAddressLongitude'] as num?)
+                ?.toDouble();
             _createdAt = data['createdAt'] is Timestamp
                 ? (data['createdAt'] as Timestamp).toDate()
                 : null;
@@ -534,6 +616,24 @@ class _ProfileScreenState extends State<ProfileScreen> {
             ).formatted;
           });
           _libreDays.sort((a, b) => a.compareTo(b));
+
+          // Check for scoped concierge account
+          if (doc.data()?['isStayFixAssigned'] == true) {
+            final userDoc = await FirebaseFirestore.instance
+                .collection('users')
+                .doc(user.uid)
+                .get();
+            final accountType = userDoc.data()?['accountType'] as String?;
+            if (accountType == 'concierge' && mounted) {
+              setState(() {
+                _isConcierge = true;
+                _stayfixBadgeLabel = _buildStayFixBadgeLabel();
+                _aptName =
+                    (doc.data()?['apartmentName'] as String?)?.trim() ?? '';
+              });
+              await _syncStayFixBadgeLabel();
+            }
+          }
         }
 
         // Load pending roles from workers collection
@@ -694,18 +794,30 @@ class _ProfileScreenState extends State<ProfileScreen> {
 
       if (compressed == null) throw 'Erreur compression';
 
-      final bytes = await File(compressed.path).readAsBytes();
-      final base64String = base64Encode(bytes);
+      final compressedFile = File(compressed.path);
 
       final user = FirebaseAuth.instance.currentUser;
       if (user != null) {
+        final uploadedMedia = await VpsMediaService.uploadFile(
+          file: compressedFile,
+          category: 'profile-image',
+          folder: 'profiles/${user.uid}',
+        );
         await FirebaseFirestore.instance
             .collection('profiles')
             .doc(user.uid)
-            .update({'photoBase64': base64String});
+            .update({
+              'photoUrl': uploadedMedia.url,
+              'photoURL': uploadedMedia.url,
+              'photoBase64': FieldValue.delete(),
+            });
+        await user.updatePhotoURL(uploadedMedia.url);
 
         if (mounted) {
-          setState(() => _photoBase64 = base64String);
+          setState(() {
+            _photoBase64 = null;
+            _photoUrl = uploadedMedia.url;
+          });
           _showInfo('Photo mise a jour.');
         }
       }
@@ -796,6 +908,10 @@ class _ProfileScreenState extends State<ProfileScreen> {
   }
 
   Future<void> _changeDepartment(String newDept) async {
+    if (_isRoleEditingLocked) {
+      _showRoleLockedMessage();
+      return;
+    }
     final normalizedDept = _normalizeDepartmentName(newDept);
     if (_department == normalizedDept) return;
 
@@ -826,9 +942,14 @@ class _ProfileScreenState extends State<ProfileScreen> {
       setState(() => _openSection = ProfileSection.specialties);
       await _scrollToKey(_specialtiesSectionKey);
     }
+    await _syncStayFixBadgeLabel();
   }
 
   Future<void> _toggleSpecialty(String spec) async {
+    if (_isRoleEditingLocked) {
+      _showRoleLockedMessage();
+      return;
+    }
     final normalizedSpec = _normalizeSpecialtyName(spec);
     if (_selectedSpecialties.contains(normalizedSpec)) {
       setState(() {
@@ -873,6 +994,7 @@ class _ProfileScreenState extends State<ProfileScreen> {
       setState(() => _openSection = null);
       await _scrollToKey(_availabilitySectionKey);
     }
+    await _syncStayFixBadgeLabel();
   }
 
   Future<void> _editDepartmentExperienceYears() async {
@@ -1483,6 +1605,10 @@ class _ProfileScreenState extends State<ProfileScreen> {
   }
 
   Future<void> _showAddDepartmentRoleSheet() async {
+    if (_isRoleEditingLocked) {
+      _showRoleLockedMessage();
+      return;
+    }
     if (_department.trim().isEmpty) return;
 
     final deptSpecialties = _currentDepartmentSpecialties();
@@ -1577,13 +1703,11 @@ class _ProfileScreenState extends State<ProfileScreen> {
                                 await FirebaseFirestore.instance
                                     .collection('workers')
                                     .doc(uid)
-                                    .set(
-                                      {
-                                        'pendingRoles':
-                                            FieldValue.arrayUnion([role]),
-                                      },
-                                      SetOptions(merge: true),
-                                    );
+                                    .set({
+                                      'pendingRoles': FieldValue.arrayUnion([
+                                        role,
+                                      ]),
+                                    }, SetOptions(merge: true));
                                 if (mounted) {
                                   setState(() {
                                     if (!_pendingRoles.contains(role)) {
@@ -1664,6 +1788,10 @@ class _ProfileScreenState extends State<ProfileScreen> {
   }
 
   void _showAddRoleDialog(String departmentName, Color deptColor) {
+    if (_isRoleEditingLocked) {
+      _showRoleLockedMessage();
+      return;
+    }
     final roleController = TextEditingController();
 
     showDialog(
@@ -1849,6 +1977,29 @@ class _ProfileScreenState extends State<ProfileScreen> {
     }
   }
 
+  void _openCvViewer() {
+    if (_cvBase64 == null || _cvFileName == null) return;
+    try {
+      final bytes = base64Decode(_cvBase64!);
+      Navigator.push(
+        context,
+        MaterialPageRoute(
+          builder: (_) => AppPdfViewerPage(
+            pdfBytes: bytes,
+            fileName: _cvFileName!,
+            backgroundColor: kProfilePageBg,
+            appBarColor: kProfilePageBg,
+            iconColor: kProfileBlue,
+            titleColor: kProfileText,
+            shadowColor: const Color(0x140F63FF),
+          ),
+        ),
+      );
+    } catch (e) {
+      _showInfo("Erreur lors de l'ouverture: $e", isError: true);
+    }
+  }
+
   Widget _sheetHandle() {
     return Container(
       width: 56,
@@ -2021,6 +2172,10 @@ class _ProfileScreenState extends State<ProfileScreen> {
             _sheetHandle(),
             _cvOptionItem(LucideIcons.download, 'Voir le CV', () {
               Navigator.pop(ctx);
+              _openCvViewer();
+            }),
+            _cvOptionItem(LucideIcons.downloadCloud, 'Télécharger', () {
+              Navigator.pop(ctx);
               _downloadAndOpenCV();
             }),
             _cvOptionItem(LucideIcons.edit3, 'Modifier le nom', () {
@@ -2173,16 +2328,72 @@ class _ProfileScreenState extends State<ProfileScreen> {
   }
 
   ImageProvider? _profileImage() {
+    if (_photoUrl?.trim().isNotEmpty == true) {
+      return NetworkImage(_photoUrl!.trim());
+    }
     if (_photoBase64 == null || _photoBase64!.isEmpty) return null;
     return MemoryImage(base64Decode(_photoBase64!));
   }
 
-  String _displayName() => _username.isEmpty ? 'Utilisateur' : _username;
+  String _displayName() {
+    if (_username.trim().isNotEmpty) return _username.trim();
+    final authName =
+        FirebaseAuth.instance.currentUser?.displayName?.trim() ?? '';
+    return authName.isNotEmpty ? authName : 'Utilisateur';
+  }
 
-  String _displayDepartment() =>
-      _department.isEmpty ? 'Non defini' : _department;
+  String _displayDepartment() => _isConcierge
+      ? 'Concierge'
+      : (_department.isEmpty ? 'Non defini' : _department);
+
+  Widget _buildProfileConciergeBadge() {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Container(
+          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+          decoration: BoxDecoration(
+            color: kProfileLightBlue,
+            borderRadius: BorderRadius.circular(20),
+            border: Border.all(color: kProfileBlue.withValues(alpha: 0.35)),
+          ),
+          child: Row(
+            mainAxisSize: MainAxisSize.max,
+            children: [
+              Icon(Icons.badge_outlined, color: kProfileBlue, size: 13),
+              const SizedBox(width: 5),
+              Expanded(
+                child: Text(
+                  _stayfixBadgeLabel,
+                  maxLines: 2,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(
+                    color: kProfileBlue,
+                    fontSize: 11.5,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
+        if (_aptName.isNotEmpty) ...[
+          const SizedBox(height: 4),
+          Text(
+            'Appartement: $_aptName',
+            style: TextStyle(
+              color: kProfileBlue.withValues(alpha: 0.80),
+              fontSize: 12,
+              fontWeight: FontWeight.w500,
+            ),
+          ),
+        ],
+      ],
+    );
+  }
 
   String _primarySpecialty() {
+    if (_isConcierge) return 'Concierge';
     if (_selectedSpecialties.isEmpty) return 'Aucune specialite';
     if (_selectedSpecialties.length == 1) return _selectedSpecialties.first;
     return '${_selectedSpecialties.first} +${_selectedSpecialties.length - 1}';
@@ -2541,17 +2752,22 @@ class _ProfileScreenState extends State<ProfileScreen> {
                         fontWeight: FontWeight.w700,
                       ),
                     ),
+                    if (_isConcierge) ...[
+                      const SizedBox(height: 8),
+                      _buildProfileConciergeBadge(),
+                    ],
                     const SizedBox(height: 10),
                     Wrap(
                       spacing: 8,
                       runSpacing: 8,
                       children: [
-                        _summaryChip(
-                          icon: _primaryRoleIcon(),
-                          text: _primarySpecialty(),
-                          color: kProfileBlue,
-                          background: kProfileLightBlue,
-                        ),
+                        if (!_isConcierge)
+                          _summaryChip(
+                            icon: _primaryRoleIcon(),
+                            text: _primarySpecialty(),
+                            color: kProfileBlue,
+                            background: kProfileLightBlue,
+                          ),
                         _summaryChip(
                           icon: LucideIcons.fileWarning,
                           text: _cvStatusText(),
@@ -2848,7 +3064,7 @@ class _ProfileScreenState extends State<ProfileScreen> {
     }
   }
 
-  // ── Poste actuel card + edit modal ────────────────────────────────────────
+  //   Poste actuel card + edit modal
 
   String _displayJobValue(String v) =>
       v.trim().isEmpty ? 'Non défini' : v.trim();
@@ -2866,7 +3082,9 @@ class _ProfileScreenState extends State<ProfileScreen> {
       backgroundColor: Colors.transparent,
       builder: (ctx) => StatefulBuilder(
         builder: (ctx, setSheet) => Padding(
-          padding: EdgeInsets.only(bottom: MediaQuery.of(ctx).viewInsets.bottom),
+          padding: EdgeInsets.only(
+            bottom: MediaQuery.of(ctx).viewInsets.bottom,
+          ),
           child: Container(
             padding: const EdgeInsets.fromLTRB(20, 14, 20, 24),
             decoration: const BoxDecoration(
@@ -2905,8 +3123,11 @@ class _ProfileScreenState extends State<ProfileScreen> {
                           color: kProfileLightBlue,
                           borderRadius: BorderRadius.circular(16),
                         ),
-                        child: const Icon(LucideIcons.briefcase,
-                            color: kProfileBlue, size: 20),
+                        child: const Icon(
+                          LucideIcons.briefcase,
+                          color: kProfileBlue,
+                          size: 20,
+                        ),
                       ),
                       const SizedBox(width: 12),
                       const Expanded(
@@ -2946,25 +3167,33 @@ class _ProfileScreenState extends State<ProfileScreen> {
                     child: TextField(
                       controller: locCtrl,
                       style: const TextStyle(
-                          color: kProfileText,
-                          fontSize: 15,
-                          fontWeight: FontWeight.w600),
+                        color: kProfileText,
+                        fontSize: 15,
+                        fontWeight: FontWeight.w600,
+                      ),
                       decoration: InputDecoration(
                         labelText: 'Lieu de travail',
-                        labelStyle:
-                            const TextStyle(color: kProfileMuted, fontSize: 14),
+                        labelStyle: const TextStyle(
+                          color: kProfileMuted,
+                          fontSize: 14,
+                        ),
                         prefixIcon: Container(
                           margin: const EdgeInsets.all(10),
                           decoration: BoxDecoration(
                             color: kProfileLightBlue,
                             borderRadius: BorderRadius.circular(14),
                           ),
-                          child: const Icon(LucideIcons.building,
-                              color: kProfileBlue, size: 18),
+                          child: const Icon(
+                            LucideIcons.building,
+                            color: kProfileBlue,
+                            size: 18,
+                          ),
                         ),
                         border: InputBorder.none,
                         contentPadding: const EdgeInsets.symmetric(
-                            horizontal: 18, vertical: 16),
+                          horizontal: 18,
+                          vertical: 16,
+                        ),
                       ),
                     ),
                   ),
@@ -2986,8 +3215,11 @@ class _ProfileScreenState extends State<ProfileScreen> {
                             color: kProfileLightBlue,
                             borderRadius: BorderRadius.circular(14),
                           ),
-                          child: const Icon(LucideIcons.mapPin,
-                              color: kProfileBlue, size: 18),
+                          child: const Icon(
+                            LucideIcons.mapPin,
+                            color: kProfileBlue,
+                            size: 18,
+                          ),
                         ),
                         const SizedBox(width: 12),
                         Expanded(
@@ -2997,9 +3229,10 @@ class _ProfileScreenState extends State<ProfileScreen> {
                               const Text(
                                 'Adresse du poste',
                                 style: TextStyle(
-                                    color: kProfileMuted,
-                                    fontSize: 13,
-                                    fontWeight: FontWeight.w600),
+                                  color: kProfileMuted,
+                                  fontSize: 13,
+                                  fontWeight: FontWeight.w600,
+                                ),
                               ),
                               const SizedBox(height: 3),
                               Text(
@@ -3043,12 +3276,17 @@ class _ProfileScreenState extends State<ProfileScreen> {
                             foregroundColor: kProfileBlue,
                             side: const BorderSide(color: kProfileBorder),
                             padding: const EdgeInsets.symmetric(
-                                horizontal: 14, vertical: 10),
+                              horizontal: 14,
+                              vertical: 10,
+                            ),
                             shape: RoundedRectangleBorder(
-                                borderRadius: BorderRadius.circular(14)),
+                              borderRadius: BorderRadius.circular(14),
+                            ),
                           ),
-                          child: const Text('Modifier',
-                              style: TextStyle(fontWeight: FontWeight.w800)),
+                          child: const Text(
+                            'Modifier',
+                            style: TextStyle(fontWeight: FontWeight.w800),
+                          ),
                         ),
                       ],
                     ),
@@ -3064,25 +3302,33 @@ class _ProfileScreenState extends State<ProfileScreen> {
                     child: TextField(
                       controller: dateCtrl,
                       style: const TextStyle(
-                          color: kProfileText,
-                          fontSize: 15,
-                          fontWeight: FontWeight.w600),
+                        color: kProfileText,
+                        fontSize: 15,
+                        fontWeight: FontWeight.w600,
+                      ),
                       decoration: InputDecoration(
                         labelText: 'Date de début',
-                        labelStyle:
-                            const TextStyle(color: kProfileMuted, fontSize: 14),
+                        labelStyle: const TextStyle(
+                          color: kProfileMuted,
+                          fontSize: 14,
+                        ),
                         prefixIcon: Container(
                           margin: const EdgeInsets.all(10),
                           decoration: BoxDecoration(
                             color: kProfileLightBlue,
                             borderRadius: BorderRadius.circular(14),
                           ),
-                          child: const Icon(LucideIcons.calendarDays,
-                              color: kProfileBlue, size: 18),
+                          child: const Icon(
+                            LucideIcons.calendarDays,
+                            color: kProfileBlue,
+                            size: 18,
+                          ),
                         ),
                         border: InputBorder.none,
                         contentPadding: const EdgeInsets.symmetric(
-                            horizontal: 18, vertical: 16),
+                          horizontal: 18,
+                          vertical: 16,
+                        ),
                       ),
                     ),
                   ),
@@ -3103,12 +3349,15 @@ class _ProfileScreenState extends State<ProfileScreen> {
                         elevation: 0,
                         padding: const EdgeInsets.symmetric(vertical: 16),
                         shape: RoundedRectangleBorder(
-                            borderRadius: BorderRadius.circular(20)),
+                          borderRadius: BorderRadius.circular(20),
+                        ),
                       ),
                       child: const Text(
                         'Enregistrer',
                         style: TextStyle(
-                            fontSize: 15, fontWeight: FontWeight.w800),
+                          fontSize: 15,
+                          fontWeight: FontWeight.w800,
+                        ),
                       ),
                     ),
                   ),
@@ -3156,9 +3405,9 @@ class _ProfileScreenState extends State<ProfileScreen> {
         }
       } catch (e) {
         if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(content: Text('Erreur : $e')),
-          );
+          ScaffoldMessenger.of(
+            context,
+          ).showSnackBar(SnackBar(content: Text('Erreur : $e')));
         }
       }
     }
@@ -3187,8 +3436,11 @@ class _ProfileScreenState extends State<ProfileScreen> {
                     color: kProfileLightBlue,
                     shape: BoxShape.circle,
                   ),
-                  child: const Icon(LucideIcons.briefcase,
-                      color: kProfileBlue, size: 16),
+                  child: const Icon(
+                    LucideIcons.briefcase,
+                    color: kProfileBlue,
+                    size: 16,
+                  ),
                 ),
                 const SizedBox(width: 10),
                 const Expanded(
@@ -3201,19 +3453,27 @@ class _ProfileScreenState extends State<ProfileScreen> {
                     ),
                   ),
                 ),
-                const Icon(LucideIcons.edit3,
-                    color: kProfileMuted, size: 14),
+                const Icon(LucideIcons.edit3, color: kProfileMuted, size: 14),
               ],
             ),
             const SizedBox(height: 10),
             _profileDetailRow(
-                LucideIcons.building, 'Lieu', _displayJobValue(_jobLocation)),
+              LucideIcons.building,
+              'Lieu',
+              _displayJobValue(_jobLocation),
+            ),
             const SizedBox(height: 6),
             _profileDetailRow(
-                LucideIcons.mapPin, 'Adresse', _displayJobValue(_jobAddress)),
+              LucideIcons.mapPin,
+              'Adresse',
+              _displayJobValue(_jobAddress),
+            ),
             const SizedBox(height: 6),
-            _profileDetailRow(LucideIcons.calendarDays, 'Depuis le',
-                _displayJobValue(_jobStartDate)),
+            _profileDetailRow(
+              LucideIcons.calendarDays,
+              'Depuis le',
+              _displayJobValue(_jobStartDate),
+            ),
           ],
         ),
       ),
@@ -3386,7 +3646,7 @@ class _ProfileScreenState extends State<ProfileScreen> {
               _actionPill(
                 label: 'Voir le CV',
                 icon: LucideIcons.eye,
-                onTap: _downloadAndOpenCV,
+                onTap: _openCvViewer,
               ),
               _actionPill(
                 label: 'Options',
@@ -3410,7 +3670,9 @@ class _ProfileScreenState extends State<ProfileScreen> {
             child: ClipRRect(
               borderRadius: BorderRadius.circular(16),
               child: CvPreviewCarousel(
-                  cvBase64: _cvBase64!, cvFileName: _cvFileName!),
+                cvBase64: _cvBase64!,
+                cvFileName: _cvFileName!,
+              ),
             ),
           ),
         ],
@@ -3465,9 +3727,11 @@ class _ProfileScreenState extends State<ProfileScreen> {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        const Text(
-          'Touchez un departement pour le changer a tout moment.',
-          style: TextStyle(
+        Text(
+          _isRoleEditingLocked
+              ? 'Ce departement est gere par StayFix Job et reste verrouille pour le compte concierge.'
+              : 'Touchez un departement pour le changer a tout moment.',
+          style: const TextStyle(
             color: kProfileMuted,
             fontSize: 13,
             height: 1.45,
@@ -3484,7 +3748,9 @@ class _ProfileScreenState extends State<ProfileScreen> {
             final color = dept['color'] as Color;
 
             return InkWell(
-              onTap: () => _changeDepartment(name),
+              onTap: _isRoleEditingLocked
+                  ? _showRoleLockedMessage
+                  : () => _changeDepartment(name),
               borderRadius: BorderRadius.circular(18),
               child: Container(
                 padding: const EdgeInsets.symmetric(
@@ -3575,8 +3841,10 @@ class _ProfileScreenState extends State<ProfileScreen> {
                       ],
                     ),
                   ),
-                  const Icon(
-                    LucideIcons.pencil,
+                  Icon(
+                    _isRoleEditingLocked
+                        ? LucideIcons.lock
+                        : LucideIcons.pencil,
                     color: kProfileMuted,
                     size: 18,
                   ),
@@ -3624,7 +3892,9 @@ class _ProfileScreenState extends State<ProfileScreen> {
         ],
         const SizedBox(height: 10),
         InkWell(
-          onTap: () => _showAddDepartmentRoleSheet(),
+          onTap: _isRoleEditingLocked
+              ? _showRoleLockedMessage
+              : () => _showAddDepartmentRoleSheet(),
           borderRadius: BorderRadius.circular(18),
           child: Container(
             padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
@@ -3639,7 +3909,7 @@ class _ProfileScreenState extends State<ProfileScreen> {
                 const Icon(LucideIcons.plus, size: 15, color: kProfileMuted),
                 const SizedBox(width: 8),
                 Text(
-                  'Ajouter',
+                  _isRoleEditingLocked ? 'Verrouille' : 'Ajouter',
                   style: TextStyle(
                     color: color,
                     fontSize: 12.5,
@@ -3667,8 +3937,10 @@ class _ProfileScreenState extends State<ProfileScreen> {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        const Text(
-          'Choisissez votre ou vos roles dans ce departement.',
+        Text(
+          _isRoleEditingLocked
+              ? 'Le role principal du concierge est verrouille et visible en lecture seule.'
+              : 'Choisissez votre ou vos roles dans ce departement.',
           style: TextStyle(
             color: kProfileMuted,
             fontSize: 13,
@@ -3684,7 +3956,9 @@ class _ProfileScreenState extends State<ProfileScreen> {
             ...specialties.map((spec) {
               final isSelected = _selectedSpecialties.contains(spec);
               return InkWell(
-                onTap: () => _toggleSpecialty(spec),
+                onTap: _isRoleEditingLocked
+                    ? _showRoleLockedMessage
+                    : () => _toggleSpecialty(spec),
                 borderRadius: BorderRadius.circular(18),
                 child: Container(
                   padding: const EdgeInsets.symmetric(
@@ -3732,7 +4006,9 @@ class _ProfileScreenState extends State<ProfileScreen> {
               );
             }),
             InkWell(
-              onTap: () => _showAddRoleDialog(_department, color),
+              onTap: _isRoleEditingLocked
+                  ? _showRoleLockedMessage
+                  : () => _showAddRoleDialog(_department, color),
               borderRadius: BorderRadius.circular(18),
               child: Container(
                 padding: const EdgeInsets.symmetric(
@@ -3754,7 +4030,7 @@ class _ProfileScreenState extends State<ProfileScreen> {
                     ),
                     const SizedBox(width: 8),
                     Text(
-                      'Ajouter',
+                      _isRoleEditingLocked ? 'Verrouille' : 'Ajouter',
                       style: TextStyle(
                         color: color,
                         fontSize: 12.5,
@@ -4238,7 +4514,9 @@ class _ProfileScreenState extends State<ProfileScreen> {
           content: const Text('Examen Stayfix Job — bientôt disponible !'),
           backgroundColor: const Color(0xFFB8860B),
           behavior: SnackBarBehavior.floating,
-          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(14),
+          ),
         ),
       ),
       child: Container(
@@ -4268,7 +4546,11 @@ class _ProfileScreenState extends State<ProfileScreen> {
                 color: Colors.white.withValues(alpha: 0.18),
                 borderRadius: BorderRadius.circular(14),
               ),
-              child: const Icon(LucideIcons.trophy, color: Colors.white, size: 22),
+              child: const Icon(
+                LucideIcons.trophy,
+                color: Colors.white,
+                size: 22,
+              ),
             ),
             const SizedBox(width: 14),
             Expanded(

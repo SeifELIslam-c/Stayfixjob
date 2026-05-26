@@ -39,14 +39,14 @@
 	<key>UIApplicationSupportsIndirectInputEvents</key>
 	<true/>
 	<key>NSLocationWhenInUseUsageDescription</key>
-	<string>Votre position est utilisee pour verifier que vous etes bien dans la zone de travail avant le pointage.</string>
-	<key>NSLocationAlwaysAndWhenInUseUsageDescription</key>
-	<string>Votre position est utilisee pour verifier que vous etes bien dans la zone de travail avant le pointage.</string>
+	<string>Votre position est utilisee pour confirmer que vous etes sur le lieu de travail avant le pointage et pour proposer une adresse lors des mises a jour de profil.</string>
 	<key>ITSAppUsesNonExemptEncryption</key>
 	<false/>
 	<key>NSCameraUsageDescription</key>
-	<string>L'accès à la caméra est nécessaire pour enregistrer des vidéos et prendre des photos.</string>
+	<string>L'acces a la camera permet au personnel de prendre une photo de profil, d'envoyer des photos dans les conversations de travail et d'enregistrer des videos pour les mises a jour d'intervention.</string>
+	<key>NSPhotoLibraryUsageDescription</key>
+	<string>L'acces a la phototheque permet au personnel de choisir une photo de profil, d'ajouter des images aux conversations de travail et de joindre des medias aux stories et offres.</string>
 	<key>NSMicrophoneUsageDescription</key>
-	<string>L'accès au microphone est nécessaire pour enregistrer des vidéos avec du son.</string>
+	<string>L'acces au microphone permet d'enregistrer des messages vocaux et des videos avec du son dans les conversations de travail.</string>
 </dict>
 </plist>

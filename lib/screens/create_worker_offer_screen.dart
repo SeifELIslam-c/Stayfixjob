@@ -1,10 +1,13 @@
+import 'dart:async';
 import 'dart:io';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 import '../services/offers_service.dart';
+import '../services/vps_media_service.dart';
 
 const _kBlue = Color(0xFF0F63FF);
 const _kText = Color(0xFF0F172A);
@@ -18,10 +21,12 @@ class CreateWorkerOfferScreen extends StatefulWidget {
     super.key,
     required this.worker,
     required this.offersService,
+    this.existingOffer,
   });
 
   final WorkerProfile worker;
   final OffersService offersService;
+  final WorkerOffer? existingOffer;
 
   @override
   State<CreateWorkerOfferScreen> createState() =>
@@ -35,10 +40,13 @@ class _CreateWorkerOfferScreenState extends State<CreateWorkerOfferScreen> {
   final _originalPriceCtrl = TextEditingController();
   final _promoPriceCtrl = TextEditingController();
   final _picker = ImagePicker();
+  final _scrollController = ScrollController();
 
   late final List<Map<String, dynamic>> _availabilitySlots;
 
   File? _selectedImage;
+  VpsUploadedMedia? _uploadedImage;
+  bool _removeExistingImage = false;
   late String _department;
   late String _specialty;
   bool _promotionEnabled = false;
@@ -47,6 +55,7 @@ class _CreateWorkerOfferScreenState extends State<CreateWorkerOfferScreen> {
   String _proposedStartTime = '08:00 AM';
   String _proposedEndTime = '04:00 PM';
   bool _isPublishing = false;
+  bool _isUploadingImage = false;
 
   final List<String> _timeOptions = const <String>[
     '06:00 AM',
@@ -66,20 +75,59 @@ class _CreateWorkerOfferScreenState extends State<CreateWorkerOfferScreen> {
     '08:00 PM',
   ];
 
+  bool get _isQualifiedDepartment {
+    final normalized = _department
+        .toLowerCase()
+        .replaceAll('œ', 'oe')
+        .replaceAll(RegExp(r'[^a-z0-9]+'), ' ')
+        .trim();
+    return normalized.contains('main') &&
+        normalized.contains('oeuvre') &&
+        normalized.contains('qualifiee');
+  }
+
+  bool get _canChooseSpecialty =>
+      !_isQualifiedDepartment && widget.worker.specialties.length > 1;
+
   @override
   void initState() {
     super.initState();
+    assert(() {
+      _publish;
+      return true;
+    }());
+    final existingOffer = widget.existingOffer;
     _department = widget.worker.department;
-    _specialty = widget.worker.specialties.isNotEmpty
-        ? widget.worker.specialties.first
-        : '';
+    _specialty =
+        existingOffer?.selectedSpecialty ??
+        (widget.worker.specialties.isNotEmpty
+            ? widget.worker.specialties.first
+            : '');
     _availabilitySlots = widget.worker.availabilitySlots
         .map((slot) => Map<String, dynamic>.from(slot))
         .toList();
+    if (existingOffer != null) {
+      _titleCtrl.text = existingOffer.title;
+      _descriptionCtrl.text = existingOffer.description;
+      _promotionEnabled = existingOffer.isPromotion;
+      _availableNow = existingOffer.isAvailableNow;
+      if (existingOffer.regularRate != null) {
+        _regularPriceCtrl.text = existingOffer.regularRate!.toStringAsFixed(0);
+      }
+      if (existingOffer.originalRate != null) {
+        _originalPriceCtrl.text =
+            existingOffer.originalRate!.toStringAsFixed(0);
+      }
+      if (existingOffer.promotionalRate != null) {
+        _promoPriceCtrl.text =
+            existingOffer.promotionalRate!.toStringAsFixed(0);
+      }
+    }
   }
 
   @override
   void dispose() {
+    _scrollController.dispose();
     _titleCtrl.dispose();
     _descriptionCtrl.dispose();
     _regularPriceCtrl.dispose();
@@ -89,6 +137,7 @@ class _CreateWorkerOfferScreenState extends State<CreateWorkerOfferScreen> {
   }
 
   Future<void> _pickImage() async {
+    FocusScope.of(context).unfocus();
     final picked = await _picker.pickImage(
       source: ImageSource.gallery,
       imageQuality: 88,
@@ -101,10 +150,41 @@ class _CreateWorkerOfferScreenState extends State<CreateWorkerOfferScreen> {
       _showSnack("JPG, PNG - Max. 5 Mo");
       return;
     }
-    setState(() => _selectedImage = file);
+    setState(() {
+      _selectedImage = file;
+      _uploadedImage = null;
+      _removeExistingImage = false;
+      _isUploadingImage = true;
+    });
+    unawaited(_uploadSelectedImage(file));
+  }
+
+  Future<void> _uploadSelectedImage(File file) async {
+    try {
+      final workerSlug = _slugify(widget.worker.username);
+      final uploaded = await VpsMediaService.uploadFile(
+        file: file,
+        category: 'workers-offers-media',
+        folder: 'workers_offers_media/$workerSlug',
+        extraFields: <String, String>{
+          'workerName': widget.worker.username,
+          'workerId': widget.worker.uid,
+        },
+      );
+      if (!mounted || _selectedImage?.path != file.path) return;
+      setState(() {
+        _uploadedImage = uploaded;
+        _isUploadingImage = false;
+      });
+    } catch (_) {
+      if (!mounted || _selectedImage?.path != file.path) return;
+      setState(() => _isUploadingImage = false);
+      _showSnack("Impossible d'envoyer l'image pour le moment.");
+    }
   }
 
   Future<void> _pickTime({required bool isStart}) async {
+    FocusScope.of(context).unfocus();
     final current = isStart ? _proposedStartTime : _proposedEndTime;
     final selected = await showModalBottomSheet<String>(
       context: context,
@@ -219,10 +299,113 @@ class _CreateWorkerOfferScreenState extends State<CreateWorkerOfferScreen> {
     }
   }
 
+  Future<void> _submitOfferEnhanced() async {
+    if (_titleCtrl.text.trim().isEmpty) {
+      _showSnack('Veuillez saisir un titre.');
+      return;
+    }
+    if (_descriptionCtrl.text.trim().isEmpty) {
+      _showSnack('Veuillez ajouter une description.');
+      return;
+    }
+
+    final regularRate = double.tryParse(
+      _regularPriceCtrl.text.replaceAll(',', '.'),
+    );
+    final originalRate = double.tryParse(
+      _originalPriceCtrl.text.replaceAll(',', '.'),
+    );
+    final promoRate = double.tryParse(
+      _promoPriceCtrl.text.replaceAll(',', '.'),
+    );
+
+    if (_isUploadingImage) {
+      _showSnack("Patientez pendant l'envoi de l'image.");
+      return;
+    }
+
+    setState(() => _isPublishing = true);
+    try {
+      if (widget.existingOffer == null) {
+        await widget.offersService.createWorkerOffer(
+          worker: widget.worker,
+          title: _titleCtrl.text,
+          description: _descriptionCtrl.text,
+          department: _department,
+          specialty: _specialty,
+          availabilitySlots: _availabilitySlots,
+          proposedStartTime: _proposedStartTime,
+          proposedEndTime: _proposedEndTime,
+          proposedAllDay: _proposedAllDay,
+          regularRate: regularRate,
+          isPromotion: _promotionEnabled,
+          originalRate: originalRate,
+          promotionalRate: promoRate,
+          isAvailableNow: _availableNow,
+          imageFile: _selectedImage,
+          uploadedImage: _uploadedImage,
+        );
+      } else {
+        await widget.offersService.updateWorkerOffer(
+          existingOffer: widget.existingOffer!,
+          worker: widget.worker,
+          title: _titleCtrl.text,
+          description: _descriptionCtrl.text,
+          department: _department,
+          specialty: _specialty,
+          availabilitySlots: _availabilitySlots,
+          proposedStartTime: _proposedStartTime,
+          proposedEndTime: _proposedEndTime,
+          proposedAllDay: _proposedAllDay,
+          regularRate: regularRate,
+          isPromotion: _promotionEnabled,
+          originalRate: originalRate,
+          promotionalRate: promoRate,
+          isAvailableNow: _availableNow,
+          imageFile: _selectedImage,
+          uploadedImage: _uploadedImage,
+          removeImage: _removeExistingImage,
+        );
+      }
+      if (!mounted) return;
+      SystemSound.play(SystemSoundType.click);
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            widget.existingOffer == null
+                ? "Offre publiée avec succès."
+                : "Offre mise à jour avec succès.",
+          ),
+          behavior: SnackBarBehavior.floating,
+        ),
+      );
+      Navigator.pop(context, true);
+    } on AddressRequiredException {
+      _showSnack(
+        "Assignez votre adresse dans votre profil avant de publier une offre.",
+      );
+    } catch (_) {
+      _showSnack("Une erreur est survenue. Réessayez.");
+    } finally {
+      if (mounted) {
+        setState(() => _isPublishing = false);
+      }
+    }
+  }
+
   void _showSnack(String message) {
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(content: Text(message), behavior: SnackBarBehavior.floating),
     );
+  }
+
+  String _slugify(String value) {
+    final normalized = value.trim().toLowerCase().replaceAll(
+      RegExp(r'[^a-z0-9]+'),
+      '_',
+    );
+    final cleaned = normalized.replaceAll(RegExp(r'^_+|_+$'), '');
+    return cleaned.isEmpty ? 'worker' : cleaned;
   }
 
   @override
@@ -231,16 +414,18 @@ class _CreateWorkerOfferScreenState extends State<CreateWorkerOfferScreen> {
       backgroundColor: _kBg,
       body: SafeArea(
         child: ListView(
+          controller: _scrollController,
+          keyboardDismissBehavior: ScrollViewKeyboardDismissBehavior.onDrag,
           padding: const EdgeInsets.fromLTRB(18, 10, 18, 24),
           children: [
-            Row(
+            Column(
               children: [
                 _headerButton(
                   LucideIcons.arrowLeft,
                   () => Navigator.pop(context),
                 ),
                 const SizedBox(width: 14),
-                const Expanded(
+                Expanded(
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
@@ -275,6 +460,11 @@ class _CreateWorkerOfferScreenState extends State<CreateWorkerOfferScreen> {
               child: TextField(
                 controller: _titleCtrl,
                 maxLength: 60,
+                style: const TextStyle(
+                  color: _kText,
+                  fontSize: 15,
+                  fontWeight: FontWeight.w700,
+                ),
                 decoration: _inputDecoration("Ex. : Réparation fuite évier"),
               ),
             ),
@@ -286,41 +476,46 @@ class _CreateWorkerOfferScreenState extends State<CreateWorkerOfferScreen> {
                 controller: _descriptionCtrl,
                 maxLines: 5,
                 maxLength: 300,
+                style: const TextStyle(
+                  color: _kText,
+                  fontSize: 15,
+                  fontWeight: FontWeight.w600,
+                ),
                 decoration: _inputDecoration(
                   'Décrivez votre service, votre expérience et ce qui vous démarque...',
                 ),
               ),
             ),
             const SizedBox(height: 14),
-            Row(
+            Column(
               children: [
-                Expanded(
-                  child: _sectionCard(
+                _sectionCard(
                     icon: LucideIcons.building2,
                     title: 'Département',
                     child: _readOnlyProfileField(
                       _department.isEmpty ? '—' : _department,
                     ),
-                  ),
                 ),
-                const SizedBox(width: 12),
-                Expanded(
-                  child: _sectionCard(
-                    icon: LucideIcons.user,
-                    title: 'Spécialité / rôle',
-                    child: _readOnlyProfileField(
-                      _specialty.isEmpty ? '—' : _specialty,
-                    ),
-                  ),
+                const SizedBox(height: 12),
+                _sectionCard(
+                  icon: LucideIcons.user,
+                  title: 'Spécialité / rôle',
+                  child: _canChooseSpecialty
+                      ? _specialtyPickerField()
+                      : _readOnlyProfileField(
+                          _specialty.isEmpty ? '—' : _specialty,
+                        ),
                 ),
               ],
             ),
             const SizedBox(height: 6),
-            const Padding(
-              padding: EdgeInsets.symmetric(horizontal: 4),
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 4),
               child: Text(
-                'Ces informations proviennent de votre profil. Pour les modifier, rendez-vous dans Mon Profil.',
-                style: TextStyle(
+                _canChooseSpecialty
+                    ? 'Le département reste verrouillé depuis votre profil. Comme vous avez plusieurs spécialités, choisissez celle de cette offre.'
+                    : 'Ces informations proviennent de votre profil. Pour les modifier, rendez-vous dans Mon Profil.',
+                style: const TextStyle(
                   color: _kMuted,
                   fontSize: 12,
                   fontWeight: FontWeight.w500,
@@ -450,9 +645,27 @@ class _CreateWorkerOfferScreenState extends State<CreateWorkerOfferScreen> {
                       keyboardType: const TextInputType.numberWithOptions(
                         decimal: true,
                       ),
+                      style: const TextStyle(
+                        color: _kText,
+                        fontSize: 22,
+                        fontWeight: FontWeight.w800,
+                      ),
                       decoration: _inputDecoration(
                         'Ex. : 20',
-                      ).copyWith(prefixText: r'$ ', suffixText: '/h'),
+                      ).copyWith(
+                        prefixText: r'$ ',
+                        suffixText: '/h',
+                        prefixStyle: const TextStyle(
+                          color: _kText,
+                          fontSize: 16,
+                          fontWeight: FontWeight.w700,
+                        ),
+                        suffixStyle: const TextStyle(
+                          color: _kText,
+                          fontSize: 16,
+                          fontWeight: FontWeight.w700,
+                        ),
+                      ),
                     ),
                   ),
                 ),
@@ -508,7 +721,7 @@ class _CreateWorkerOfferScreenState extends State<CreateWorkerOfferScreen> {
             SizedBox(
               height: 58,
               child: ElevatedButton.icon(
-                onPressed: _isPublishing ? null : _publish,
+                onPressed: _isPublishing ? null : _submitOfferEnhanced,
                 style: ElevatedButton.styleFrom(
                   backgroundColor: _kBlue,
                   foregroundColor: Colors.white,
@@ -528,7 +741,13 @@ class _CreateWorkerOfferScreenState extends State<CreateWorkerOfferScreen> {
                       )
                     : const Icon(LucideIcons.send, size: 18),
                 label: Text(
-                  _isPublishing ? 'Publication...' : "Publier l'offre",
+                  _isPublishing
+                      ? (widget.existingOffer == null
+                          ? 'Publication...'
+                          : 'Mise à jour...')
+                      : (widget.existingOffer == null
+                          ? "Publier l'offre"
+                          : "Enregistrer l'offre"),
                   style: const TextStyle(
                     fontSize: 18,
                     fontWeight: FontWeight.w800,
@@ -562,9 +781,11 @@ class _CreateWorkerOfferScreenState extends State<CreateWorkerOfferScreen> {
                   'Promotion',
                   style: TextStyle(
                     color: _kBlue,
-                    fontSize: 16,
+                    fontSize: 15,
                     fontWeight: FontWeight.w800,
                   ),
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
                 ),
               ),
               Transform.scale(
@@ -585,10 +806,33 @@ class _CreateWorkerOfferScreenState extends State<CreateWorkerOfferScreen> {
               keyboardType: const TextInputType.numberWithOptions(
                 decimal: true,
               ),
+              style: const TextStyle(
+                color: _kText,
+                fontSize: 20,
+                fontWeight: FontWeight.w800,
+              ),
               decoration: _inputDecoration('Ex. : 25').copyWith(
                 labelText: 'Prix avant',
                 prefixText: r'$ ',
                 suffixText: '/h',
+                labelStyle: const TextStyle(
+                  color: _kText,
+                  fontWeight: FontWeight.w700,
+                ),
+                floatingLabelStyle: const TextStyle(
+                  color: _kText,
+                  fontWeight: FontWeight.w700,
+                ),
+                prefixStyle: const TextStyle(
+                  color: _kText,
+                  fontSize: 15,
+                  fontWeight: FontWeight.w700,
+                ),
+                suffixStyle: const TextStyle(
+                  color: _kText,
+                  fontSize: 15,
+                  fontWeight: FontWeight.w700,
+                ),
               ),
             ),
             const SizedBox(height: 10),
@@ -597,10 +841,33 @@ class _CreateWorkerOfferScreenState extends State<CreateWorkerOfferScreen> {
               keyboardType: const TextInputType.numberWithOptions(
                 decimal: true,
               ),
+              style: const TextStyle(
+                color: _kText,
+                fontSize: 20,
+                fontWeight: FontWeight.w800,
+              ),
               decoration: _inputDecoration('Ex. : 20').copyWith(
                 labelText: 'Prix promo',
                 prefixText: r'$ ',
                 suffixText: '/h',
+                labelStyle: const TextStyle(
+                  color: _kText,
+                  fontWeight: FontWeight.w700,
+                ),
+                floatingLabelStyle: const TextStyle(
+                  color: _kText,
+                  fontWeight: FontWeight.w700,
+                ),
+                prefixStyle: const TextStyle(
+                  color: _kText,
+                  fontSize: 15,
+                  fontWeight: FontWeight.w700,
+                ),
+                suffixStyle: const TextStyle(
+                  color: _kText,
+                  fontSize: 15,
+                  fontWeight: FontWeight.w700,
+                ),
               ),
             ),
           ],
@@ -624,7 +891,10 @@ class _CreateWorkerOfferScreenState extends State<CreateWorkerOfferScreen> {
           ),
         ),
         child: DottedBorderBox(
-          child: _selectedImage == null
+          child:
+              _selectedImage == null &&
+                  ((widget.existingOffer?.imageUrl?.isNotEmpty != true) ||
+                      _removeExistingImage)
               ? Column(
                   mainAxisAlignment: MainAxisAlignment.center,
                   children: const [
@@ -664,7 +934,12 @@ class _CreateWorkerOfferScreenState extends State<CreateWorkerOfferScreen> {
                   children: [
                     ClipRRect(
                       borderRadius: BorderRadius.circular(24),
-                      child: Image.file(_selectedImage!, fit: BoxFit.cover),
+                      child: _selectedImage != null
+                          ? Image.file(_selectedImage!, fit: BoxFit.cover)
+                          : Image.network(
+                              widget.existingOffer!.imageUrl!,
+                              fit: BoxFit.cover,
+                            ),
                     ),
                     Positioned(
                       right: 12,
@@ -675,11 +950,36 @@ class _CreateWorkerOfferScreenState extends State<CreateWorkerOfferScreen> {
                           const SizedBox(width: 8),
                           _imageAction(
                             'Retirer',
-                            () => setState(() => _selectedImage = null),
+                            () => setState(() {
+                              _selectedImage = null;
+                              _removeExistingImage = true;
+                            }),
                           ),
                         ],
                       ),
                     ),
+                    if (_isUploadingImage)
+                      Positioned.fill(
+                        child: Container(
+                          color: Colors.black.withValues(alpha: 0.18),
+                          child: const Center(
+                            child: Column(
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                CircularProgressIndicator(color: Colors.white),
+                                SizedBox(height: 12),
+                                Text(
+                                  "Envoi de l'image...",
+                                  style: TextStyle(
+                                    color: Colors.white,
+                                    fontWeight: FontWeight.w800,
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
+                        ),
+                      ),
                   ],
                 ),
         ),
@@ -809,6 +1109,51 @@ class _CreateWorkerOfferScreenState extends State<CreateWorkerOfferScreen> {
     );
   }
 
+  Widget _specialtyPickerField() {
+    return InkWell(
+      onTap: () async {
+        final picked = await showModalBottomSheet<String>(
+          context: context,
+          backgroundColor: Colors.transparent,
+          builder: (_) => _PickerSheet(
+            title: 'Choisir une spécialité',
+            options: widget.worker.specialties,
+            selected: _specialty,
+          ),
+        );
+        if (picked == null || !mounted) return;
+        setState(() => _specialty = picked);
+      },
+      borderRadius: BorderRadius.circular(16),
+      child: Container(
+        width: double.infinity,
+        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 14),
+        decoration: BoxDecoration(
+          color: Colors.white,
+          borderRadius: BorderRadius.circular(16),
+          border: Border.all(color: _kBorder),
+        ),
+        child: Row(
+          children: [
+            Expanded(
+              child: Text(
+                _specialty.isEmpty ? 'Choisir une spécialité' : _specialty,
+                style: TextStyle(
+                  color: _specialty.isEmpty ? _kMuted : _kText,
+                  fontWeight: FontWeight.w700,
+                  fontSize: 15,
+                ),
+                overflow: TextOverflow.ellipsis,
+              ),
+            ),
+            const SizedBox(width: 8),
+            const Icon(LucideIcons.chevronDown, color: _kBlue, size: 16),
+          ],
+        ),
+      ),
+    );
+  }
+
   Widget _headerButton(IconData icon, VoidCallback onTap) {
     return InkWell(
       onTap: onTap,
@@ -830,6 +1175,11 @@ class _CreateWorkerOfferScreenState extends State<CreateWorkerOfferScreen> {
     return InputDecoration(
       hintText: hint,
       hintStyle: const TextStyle(color: _kMuted),
+      labelStyle: const TextStyle(color: _kText, fontWeight: FontWeight.w700),
+      floatingLabelStyle: const TextStyle(
+        color: _kText,
+        fontWeight: FontWeight.w700,
+      ),
       filled: true,
       fillColor: Colors.white,
       counterText: '',
@@ -907,48 +1257,54 @@ class _PickerSheet extends StatelessWidget {
             child: SingleChildScrollView(
               child: Column(
                 mainAxisSize: MainAxisSize.min,
-                children: [...options.map(
-            (option) => Container(
-              margin: const EdgeInsets.only(bottom: 8),
-              child: InkWell(
-                onTap: () => Navigator.pop(context, option),
-                borderRadius: BorderRadius.circular(16),
-                child: Ink(
-                  padding: const EdgeInsets.symmetric(
-                    horizontal: 16,
-                    vertical: 14,
-                  ),
-                  decoration: BoxDecoration(
-                    color: option == selected
-                        ? _kLightBlue
-                        : const Color(0xFFF8FBFF),
-                    borderRadius: BorderRadius.circular(16),
-                    border: Border.all(
-                      color: option == selected ? _kBlue : _kBorder,
-                    ),
-                  ),
-                  child: Row(
-                    children: [
-                      Expanded(
-                        child: Text(
-                          option,
-                          style: TextStyle(
-                            color: option == selected ? _kBlue : _kText,
-                            fontWeight: FontWeight.w700,
+                children: [
+                  ...options.map(
+                    (option) => Container(
+                      margin: const EdgeInsets.only(bottom: 8),
+                      child: InkWell(
+                        onTap: () => Navigator.pop(context, option),
+                        borderRadius: BorderRadius.circular(16),
+                        child: Ink(
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: 16,
+                            vertical: 14,
+                          ),
+                          decoration: BoxDecoration(
+                            color: option == selected
+                                ? _kLightBlue
+                                : const Color(0xFFF8FBFF),
+                            borderRadius: BorderRadius.circular(16),
+                            border: Border.all(
+                              color: option == selected ? _kBlue : _kBorder,
+                            ),
+                          ),
+                          child: Row(
+                            children: [
+                              Expanded(
+                                child: Text(
+                                  option,
+                                  style: TextStyle(
+                                    color: option == selected ? _kBlue : _kText,
+                                    fontWeight: FontWeight.w700,
+                                  ),
+                                ),
+                              ),
+                              if (option == selected)
+                                const Icon(
+                                  LucideIcons.check,
+                                  color: _kBlue,
+                                  size: 16,
+                                ),
+                            ],
                           ),
                         ),
                       ),
-                      if (option == selected)
-                        const Icon(LucideIcons.check, color: _kBlue, size: 16),
-                    ],
+                    ),
                   ),
-                ),
+                ],
               ),
             ),
           ),
-        ]),
-          ),
-        ),
         ],
       ),
     );

@@ -21,6 +21,11 @@ class WorkerStory {
     required this.isActive,
     required this.viewCount,
     required this.viewedBy,
+    required this.visibility,
+    required this.visibilityKey,
+    required this.overlayText,
+    required this.overlayTextX,
+    required this.overlayTextY,
     this.latitude,
     this.longitude,
     this.createdAt,
@@ -39,6 +44,11 @@ class WorkerStory {
   final bool isActive;
   final int viewCount;
   final List<String> viewedBy;
+  final String visibility;
+  final String visibilityKey;
+  final String overlayText;
+  final double overlayTextX;
+  final double overlayTextY;
   final double? latitude;
   final double? longitude;
   final DateTime? createdAt;
@@ -68,6 +78,11 @@ class WorkerStory {
       viewedBy: ((data['viewedBy'] as List?) ?? const <dynamic>[])
           .map((item) => item.toString())
           .toList(),
+      visibility: data['visibility'] as String? ?? '',
+      visibilityKey: data['visibilityKey'] as String? ?? '',
+      overlayText: data['overlayText'] as String? ?? '',
+      overlayTextX: (data['overlayTextX'] as num?)?.toDouble() ?? 0.5,
+      overlayTextY: (data['overlayTextY'] as num?)?.toDouble() ?? 0.4,
       latitude: (data['latitude'] as num?)?.toDouble(),
       longitude: (data['longitude'] as num?)?.toDouble(),
       createdAt: _dateTimeFrom(data['createdAt']),
@@ -155,7 +170,9 @@ class StoryService {
     required String mediaType,
     required String caption,
     required String visibility,
+    String visibilityKey = '',
     void Function(double progress)? onProgress,
+    VpsUploadedMedia? uploadedMedia,
     String overlayText = '',
     double overlayTextX = 0.5,
     double overlayTextY = 0.4,
@@ -164,21 +181,25 @@ class StoryService {
     if (uid == null) throw StateError('Utilisateur non connecté');
 
     final category = mediaType == 'video' ? 'story-video' : 'story-image';
+    final locationFuture = _capturePublishLocation();
     debugPrint(
       'Story publish start: uid=$uid category=$category mediaType=$mediaType visibility=$visibility',
     );
-    final uploaded = await VpsMediaService.uploadFile(
-      file: mediaFile,
-      category: category,
-      onProgress: onProgress,
-    );
+    final uploaded =
+        uploadedMedia ??
+        await VpsMediaService.uploadFile(
+          file: mediaFile,
+          category: category,
+          folder: 'stories/$uid',
+          onProgress: onProgress,
+        );
 
     if (uploaded.url.trim().isEmpty) {
       throw Exception(
         'L\'URL du média est vide après l\'envoi. Vérifiez la connexion au serveur.',
       );
     }
-    final location = await _capturePublishLocation();
+    final location = await locationFuture;
 
     final storyRef = _firestore.collection('stories').doc();
     final expiresAt = DateTime.now().add(const Duration(hours: 24));
@@ -195,6 +216,7 @@ class StoryService {
       'fileId': uploaded.fileId,
       'caption': caption.trim(),
       'visibility': visibility.trim(),
+      'visibilityKey': visibilityKey.trim(),
       'createdAt': FieldValue.serverTimestamp(),
       'expiresAt': Timestamp.fromDate(expiresAt),
       'viewedBy': <String>[],

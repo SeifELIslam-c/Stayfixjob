@@ -83,6 +83,28 @@ class OffersService {
     return offers;
   }
 
+  Future<List<ManagerOffer>> loadManagerCreatedOffersForStayfixJob() async {
+    final snapshot = await _firestore
+        .collection('offers')
+        .where('targetApp', isEqualTo: 'stayfix_job')
+        .get();
+    // Filter in Dart so offers remain visible regardless of whether the manager
+    // app writes 'open', 'active', or 'published' — only exclude terminal states.
+    // ManagerOffer._parseStatus() maps any unrecognised value to OfferStatus.open,
+    // so 'active' and 'published' are treated as open automatically.
+    final offers = snapshot.docs
+        .map((doc) => ManagerOffer.fromFirestore(doc))
+        .where(
+          (offer) =>
+              offer.status != OfferStatus.assigned &&
+              offer.status != OfferStatus.completed &&
+              offer.status != OfferStatus.cancelled,
+        )
+        .toList()
+      ..sort((a, b) => b.createdAt.compareTo(a.createdAt));
+    return offers;
+  }
+
   Future<List<ManagerOffer>> loadMyAssignedOffers(String workerUid) async {
     final snapshot = await _firestore
         .collection('offers')
@@ -98,11 +120,23 @@ class OffersService {
   Future<List<WorkerOffer>> loadMyPublishedOffers() async {
     final uid = _uid;
     if (uid == null) return const <WorkerOffer>[];
-    final snapshot = await _firestore
-        .collection('worker_offers')
-        .where('workerId', isEqualTo: uid)
-        .get();
-    final offers = snapshot.docs.map(WorkerOffer.fromDocument).toList();
+    final results = await Future.wait([
+      _firestore
+          .collection('worker_offers')
+          .where('workerId', isEqualTo: uid)
+          .get(),
+      _firestore
+          .collection('workers offers')
+          .where('workerId', isEqualTo: uid)
+          .get(),
+    ]);
+    final byId = <String, WorkerOffer>{};
+    for (final snapshot in results) {
+      for (final doc in snapshot.docs) {
+        byId[doc.id] = WorkerOffer.fromDocument(doc);
+      }
+    }
+    final offers = byId.values.toList();
     offers.sort((a, b) {
       final aDate = a.createdAt ?? DateTime.fromMillisecondsSinceEpoch(0);
       final bDate = b.createdAt ?? DateTime.fromMillisecondsSinceEpoch(0);
@@ -127,6 +161,7 @@ class OffersService {
     required double? promotionalRate,
     required bool isAvailableNow,
     File? imageFile,
+    VpsUploadedMedia? uploadedImage,
   }) async {
     final uid = _uid;
     if (uid == null) throw StateError('Utilisateur non connecté');
@@ -136,12 +171,18 @@ class OffersService {
       throw const AddressRequiredException();
     }
 
-    VpsUploadedMedia? uploadedImage;
-    if (imageFile != null) {
+    var preparedUploadedImage = uploadedImage;
+    if (preparedUploadedImage == null && imageFile != null) {
       final compressed = await _compressOfferImageIfNeeded(imageFile);
-      uploadedImage = await VpsMediaService.uploadFile(
+      final workerSlug = _slugify(worker.username);
+      preparedUploadedImage = await VpsMediaService.uploadFile(
         file: compressed,
-        category: 'offer-image',
+        category: 'workers-offers-media',
+        folder: 'workers_offers_media/$workerSlug',
+        extraFields: <String, String>{
+          'workerName': worker.username,
+          'workerId': uid,
+        },
       );
     }
 
@@ -151,7 +192,7 @@ class OffersService {
         ? (((originalRate - promotionalRate) / originalRate) * 100).round()
         : null;
 
-    await offerRef.set({
+    final offerData = <String, dynamic>{
       'id': offerRef.id,
       'workerId': uid,
       'workerName': worker.username.trim(),
@@ -161,8 +202,8 @@ class OffersService {
       'selectedSpecialty': specialty.trim(),
       'title': title.trim(),
       'description': description.trim(),
-      'imageUrl': uploadedImage?.url ?? '',
-      'imageStoragePath': uploadedImage?.fileId ?? '',
+      'imageUrl': preparedUploadedImage?.url ?? '',
+      'imageStoragePath': preparedUploadedImage?.fileId ?? '',
       'status': 'active',
       'visibleToManagers': true,
       'createdAt': FieldValue.serverTimestamp(),
@@ -189,9 +230,138 @@ class OffersService {
       'managerLocationScope': 'same_city',
       'viewCount': 0,
       'contactCount': 0,
-    });
+      'mediaStorage': preparedUploadedImage == null ? null : 'vps',
+      'mediaCategory': preparedUploadedImage == null
+          ? null
+          : 'workers-offers-media',
+      'mediaFolder': preparedUploadedImage == null
+          ? null
+          : 'workers_offers_media/${_slugify(worker.username)}',
+    };
+
+    await Future.wait([
+      offerRef.set(offerData),
+      _firestore.collection('workers offers').doc(offerRef.id).set(offerData),
+    ]);
 
     return offerRef.id;
+  }
+
+  Future<void> updateWorkerOffer({
+    required WorkerOffer existingOffer,
+    required WorkerProfile worker,
+    required String title,
+    required String description,
+    required String department,
+    required String specialty,
+    required List<Map<String, dynamic>> availabilitySlots,
+    required String proposedStartTime,
+    required String proposedEndTime,
+    required bool proposedAllDay,
+    required double? regularRate,
+    required bool isPromotion,
+    required double? originalRate,
+    required double? promotionalRate,
+    required bool isAvailableNow,
+    File? imageFile,
+    VpsUploadedMedia? uploadedImage,
+    bool removeImage = false,
+  }) async {
+    final uid = _uid;
+    if (uid == null) throw StateError('Utilisateur non connecte');
+
+    var preparedUploadedImage = uploadedImage;
+    if (preparedUploadedImage == null && imageFile != null) {
+      final compressed = await _compressOfferImageIfNeeded(imageFile);
+      final workerSlug = _slugify(worker.username);
+      preparedUploadedImage = await VpsMediaService.uploadFile(
+        file: compressed,
+        category: 'workers-offers-media',
+        folder: 'workers_offers_media/$workerSlug',
+        extraFields: <String, String>{
+          'workerName': worker.username,
+          'workerId': uid,
+        },
+      );
+    }
+
+    final discountPercent =
+        isPromotion && originalRate != null && promotionalRate != null
+        ? (((originalRate - promotionalRate) / originalRate) * 100).round()
+        : null;
+
+    final nextImageUrl = removeImage
+        ? ''
+        : preparedUploadedImage?.url ?? (existingOffer.imageUrl ?? '');
+    final nextImageStoragePath = removeImage
+        ? ''
+        : preparedUploadedImage?.fileId ?? (existingOffer.imageStoragePath ?? '');
+
+    final offerData = <String, dynamic>{
+      'workerName': worker.username.trim(),
+      'workerPhotoUrl': worker.photoUrl ?? '',
+      'workerDepartment': department.trim(),
+      'workerSpecialties': worker.specialties,
+      'selectedSpecialty': specialty.trim(),
+      'title': title.trim(),
+      'description': description.trim(),
+      'imageUrl': nextImageUrl,
+      'imageStoragePath': nextImageStoragePath,
+      'updatedAt': FieldValue.serverTimestamp(),
+      'regularRate': isPromotion ? null : regularRate,
+      'isPromotion': isPromotion,
+      'originalRate': isPromotion ? originalRate : null,
+      'promotionalRate': isPromotion ? promotionalRate : null,
+      'discountPercent': isPromotion ? discountPercent : null,
+      'isAvailableNow': isAvailableNow,
+      'availabilitySlots': availabilitySlots,
+      'proposedStartTime': proposedStartTime,
+      'proposedEndTime': proposedEndTime,
+      'proposedAllDay': proposedAllDay,
+      'availableWeekDays': worker.availableWeekDays,
+      'targetCity': worker.city,
+      'targetRegion': worker.region,
+      'workerAddress': worker.address,
+      'workerAddressLatitude': worker.addressLatitude,
+      'workerAddressLongitude': worker.addressLongitude,
+      'mediaStorage': nextImageStoragePath.isEmpty ? null : 'vps',
+      'mediaCategory': nextImageStoragePath.isEmpty
+          ? null
+          : 'workers-offers-media',
+      'mediaFolder': nextImageStoragePath.isEmpty
+          ? null
+          : 'workers_offers_media/${_slugify(worker.username)}',
+    };
+
+    await Future.wait([
+      _firestore
+          .collection('worker_offers')
+          .doc(existingOffer.id)
+          .set(offerData, SetOptions(merge: true)),
+      _firestore
+          .collection('workers offers')
+          .doc(existingOffer.id)
+          .set(offerData, SetOptions(merge: true)),
+    ]);
+
+    final oldFileId = existingOffer.imageStoragePath?.trim() ?? '';
+    final replacedFileId = preparedUploadedImage?.fileId.trim() ?? '';
+    if (oldFileId.isNotEmpty &&
+        (removeImage || (replacedFileId.isNotEmpty && replacedFileId != oldFileId))) {
+      await VpsMediaService.deleteFiles([oldFileId]);
+    }
+  }
+
+  Future<void> deleteWorkerOffer(WorkerOffer offer) async {
+    await Future.wait([
+      _firestore.collection('worker_offers').doc(offer.id).delete(),
+      _firestore.collection('workers offers').doc(offer.id).delete(),
+    ]);
+
+    final fileId = offer.imageStoragePath?.trim() ?? '';
+    if (fileId.isNotEmpty) {
+      await VpsMediaService.deleteFiles([fileId]);
+    }
   }
 
   Future<bool> hasAlreadyApplied(String offerId) async {
@@ -285,6 +455,16 @@ class OffersService {
   }
 
   static double _toRadians(double degrees) => degrees * pi / 180.0;
+
+  static String _slugify(String value) {
+    final normalized = value.trim().toLowerCase().replaceAll(
+      RegExp(r'[^a-z0-9]+'),
+      '_',
+    );
+    return normalized.replaceAll(RegExp(r'^_+|_+$'), '').isEmpty
+        ? 'worker'
+        : normalized.replaceAll(RegExp(r'^_+|_+$'), '');
+  }
 }
 
 class AlreadyAppliedException implements Exception {
@@ -312,6 +492,7 @@ class WorkerOffer {
     required this.viewCount,
     required this.contactCount,
     this.imageUrl,
+    this.imageStoragePath,
     this.regularRate,
     this.originalRate,
     this.promotionalRate,
@@ -333,6 +514,7 @@ class WorkerOffer {
   final int viewCount;
   final int contactCount;
   final String? imageUrl;
+  final String? imageStoragePath;
   final double? regularRate;
   final double? originalRate;
   final double? promotionalRate;
@@ -358,6 +540,7 @@ class WorkerOffer {
       imageUrl: VpsMediaService.normalizeMediaUrlSync(
         data['imageUrl'] as String?,
       ),
+      imageStoragePath: data['imageStoragePath'] as String?,
       regularRate: (data['regularRate'] as num?)?.toDouble(),
       originalRate: (data['originalRate'] as num?)?.toDouble(),
       promotionalRate: (data['promotionalRate'] as num?)?.toDouble(),
@@ -429,7 +612,12 @@ class WorkerProfile {
 
     return WorkerProfile(
       uid: doc.id,
-      username: data['username'] as String? ?? 'Utilisateur',
+      username:
+          ((data['username'] as String?)?.trim().isNotEmpty == true
+              ? data['username'] as String
+              : ((data['name'] as String?)?.trim().isNotEmpty == true
+                    ? data['name'] as String
+                    : 'Utilisateur')),
       department: data['department'] as String? ?? '',
       specialties: _stringList(data['specialties']),
       isAvailable: data['isAvailable'] == true,

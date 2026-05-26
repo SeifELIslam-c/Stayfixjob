@@ -5,6 +5,7 @@ import 'package:intl/intl.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 import '../services/messages_repository.dart';
+import '../widgets/unread_messages_nav_item.dart';
 import 'chat_detail_screen.dart';
 import 'home_screen.dart';
 import 'offers_screen.dart';
@@ -35,6 +36,8 @@ class _MessagesScreenState extends State<MessagesScreen> {
   final TextEditingController _searchController = TextEditingController();
 
   ProfileSummary? _currentProfile;
+  Future<List<ConversationSummary>>? _hydratedConversationsFuture;
+  String? _hydratedConversationsSignature;
   bool _loadingProfile = true;
   bool _unreadOnly = false;
   _ConversationCategory _activeCategory = _ConversationCategory.all;
@@ -67,6 +70,80 @@ class _MessagesScreenState extends State<MessagesScreen> {
     if (mounted) setState(() {});
   }
 
+  Future<List<ConversationSummary>> _resolveHydratedConversations({
+    required String currentUserId,
+    required List<ConversationSeed> seeds,
+  }) {
+    final signature = _buildConversationSeedSignature(
+      currentUserId: currentUserId,
+      seeds: seeds,
+    );
+
+    if (_hydratedConversationsFuture != null &&
+        _hydratedConversationsSignature == signature) {
+      return _hydratedConversationsFuture!;
+    }
+
+    final future = Future.wait(
+      seeds.map(
+        (seed) => _repository.hydrateConversation(
+          currentUserId: currentUserId,
+          conversationId: seed.id,
+          data: seed.data,
+        ),
+      ),
+    );
+
+    _hydratedConversationsSignature = signature;
+    _hydratedConversationsFuture = future;
+    return future;
+  }
+
+  String _buildConversationSeedSignature({
+    required String currentUserId,
+    required List<ConversationSeed> seeds,
+  }) {
+    final parts =
+        seeds
+            .map((seed) {
+              final data = seed.data;
+              final unreadBy = data['unreadBy'];
+              final unreadCount = unreadBy is Map
+                  ? unreadBy[currentUserId]
+                  : null;
+              final lastMessageAt = data['lastMessageAt'];
+              final updatedAt = data['updatedAt'];
+              final createdAt = data['createdAt'];
+              final participants = data['participants'];
+              final blockedBy =
+                  data['blockedParticipantIds'] ?? data['blockedBy'];
+
+              return [
+                seed.id,
+                data['type'] ?? '',
+                data['title'] ?? '',
+                data['subtitle'] ?? '',
+                data['lastMessage'] ?? '',
+                data['preview'] ?? '',
+                data['systemBannerText'] ?? '',
+                '$lastMessageAt',
+                '$updatedAt',
+                '$createdAt',
+                '$unreadCount',
+                '$participants',
+                '$blockedBy',
+                data['managerId'] ?? '',
+                data['workerId'] ?? '',
+                data['photoUrl'] ?? '',
+                data['managerPhotoUrl'] ?? '',
+              ].join('|');
+            })
+            .toList(growable: false)
+          ..sort();
+
+    return parts.join('||');
+  }
+
   void _openHome() {
     Navigator.of(context).pushReplacement(
       MaterialPageRoute(builder: (_) => const HomeScreen(requireAuth: false)),
@@ -88,6 +165,17 @@ class _MessagesScreenState extends State<MessagesScreen> {
   void _showSnack(String text) {
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(content: Text(text), behavior: SnackBarBehavior.floating),
+    );
+  }
+
+  void _openNotificationsPage(List<ConversationSummary> conversations) {
+    Navigator.of(context).push(
+      MaterialPageRoute(
+        builder: (_) => NotificationsScreen(
+          currentProfile: _currentProfile,
+          conversations: conversations,
+        ),
+      ),
     );
   }
 
@@ -148,6 +236,15 @@ class _MessagesScreenState extends State<MessagesScreen> {
                     Navigator.pop(context);
                   },
                 ),
+                const SizedBox(height: 10),
+                _SheetActionTile(
+                  icon: LucideIcons.shield,
+                  title: 'Managers bloques',
+                  onTap: () {
+                    Navigator.pop(context);
+                    _openBlockedUsersSheet();
+                  },
+                ),
               ],
             ),
           ),
@@ -159,6 +256,11 @@ class _MessagesScreenState extends State<MessagesScreen> {
   Future<void> _openConversationActions(
     ConversationSummary conversation,
   ) async {
+    final isBlocked =
+        conversation.otherParticipantId != null &&
+        (_currentProfile?.blockedUserIds ?? const <String>[]).contains(
+          conversation.otherParticipantId,
+        );
     await showModalBottomSheet<void>(
       context: context,
       backgroundColor: Colors.transparent,
@@ -200,23 +302,37 @@ class _MessagesScreenState extends State<MessagesScreen> {
                     !conversation.isTeam) ...[
                   const SizedBox(height: 10),
                   _SheetActionTile(
-                    icon: LucideIcons.userX,
-                    title: 'Bloquer ce manager',
+                    icon: isBlocked ? LucideIcons.userCheck : LucideIcons.userX,
+                    title: isBlocked
+                        ? 'Debloquer ce manager'
+                        : 'Bloquer ce manager',
                     onTap: () async {
                       Navigator.pop(context);
                       final confirmed = await _confirmAction(
-                        title: 'Bloquer ce manager',
-                        message:
-                            'Ce contact sera ajoute a vos utilisateurs bloques et ce chat disparaitra de votre liste.',
+                        title: isBlocked
+                            ? 'Debloquer ce manager'
+                            : 'Bloquer ce manager',
+                        message: isBlocked
+                            ? 'Ce manager sera retire de vos utilisateurs bloques et la conversation redeviendra accessible.'
+                            : 'Ce contact sera ajoute a vos utilisateurs bloques et ce chat disparaitra de votre liste.',
                       );
                       if (confirmed != true) return;
-                      await _repository.blockUser(
-                        conversationId: conversation.id,
-                        blockedUserId: conversation.otherParticipantId!,
-                      );
+                      if (isBlocked) {
+                        await _repository.unblockUser(
+                          conversationId: conversation.id,
+                          unblockedUserId: conversation.otherParticipantId!,
+                        );
+                      } else {
+                        await _repository.blockUser(
+                          conversationId: conversation.id,
+                          blockedUserId: conversation.otherParticipantId!,
+                        );
+                      }
                       await _loadCurrentProfile();
                       if (!mounted) return;
-                      _showSnack('Manager bloque');
+                      _showSnack(
+                        isBlocked ? 'Manager debloque' : 'Manager bloque',
+                      );
                     },
                   ),
                 ],
@@ -240,6 +356,230 @@ class _MessagesScreenState extends State<MessagesScreen> {
                     _showSnack('Conversation supprimee');
                   },
                 ),
+              ],
+            ),
+          ),
+        );
+      },
+    );
+  }
+
+  Future<void> _openBlockedUsersSheet() async {
+    final blockedIds = _currentProfile?.blockedUserIds ?? const <String>[];
+    final blockedProfiles = await Future.wait(
+      blockedIds.map(_repository.loadProfileById),
+    );
+    if (!mounted) return;
+
+    await showModalBottomSheet<void>(
+      context: context,
+      backgroundColor: Colors.transparent,
+      isScrollControlled: true,
+      builder: (context) {
+        return Container(
+          padding: const EdgeInsets.fromLTRB(20, 12, 20, 28),
+          decoration: const BoxDecoration(
+            color: Colors.white,
+            borderRadius: BorderRadius.vertical(top: Radius.circular(30)),
+          ),
+          child: SafeArea(
+            top: false,
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Center(
+                  child: Container(
+                    width: 42,
+                    height: 4,
+                    margin: const EdgeInsets.only(bottom: 18),
+                    decoration: BoxDecoration(
+                      color: const Color(0xFFD7E4FF),
+                      borderRadius: BorderRadius.circular(999),
+                    ),
+                  ),
+                ),
+                Container(
+                  width: double.infinity,
+                  padding: const EdgeInsets.all(16),
+                  decoration: BoxDecoration(
+                    gradient: const LinearGradient(
+                      colors: [Color(0xFFEFF6FF), Color(0xFFF8FBFF)],
+                      begin: Alignment.topLeft,
+                      end: Alignment.bottomRight,
+                    ),
+                    borderRadius: BorderRadius.circular(22),
+                    border: Border.all(color: const Color(0xFFD7E4FF)),
+                  ),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: const [
+                      Text(
+                        'Managers bloques',
+                        style: TextStyle(
+                          color: kMessagesText,
+                          fontSize: 18,
+                          fontWeight: FontWeight.w800,
+                        ),
+                      ),
+                      SizedBox(height: 6),
+                      Text(
+                        'Debloquez un manager quand vous souhaitez revoir son chat.',
+                        style: TextStyle(
+                          color: kMessagesBody,
+                          fontSize: 13.2,
+                          height: 1.4,
+                          fontWeight: FontWeight.w500,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+                const SizedBox(height: 16),
+                if (blockedIds.isEmpty)
+                  Container(
+                    width: double.infinity,
+                    padding: const EdgeInsets.all(18),
+                    decoration: BoxDecoration(
+                      color: kMessagesSoftBlue,
+                      borderRadius: BorderRadius.circular(20),
+                      border: Border.all(color: kMessagesBorder),
+                    ),
+                    child: const Text(
+                      'Aucun manager bloque pour le moment.',
+                      style: TextStyle(
+                        color: kMessagesBody,
+                        fontSize: 13.5,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                  )
+                else
+                  Flexible(
+                    child: ListView.separated(
+                      shrinkWrap: true,
+                      itemCount: blockedIds.length,
+                      separatorBuilder: (_, _) => const SizedBox(height: 10),
+                      itemBuilder: (context, index) {
+                        final userId = blockedIds[index];
+                        final profile = blockedProfiles[index];
+                        final title = profile?.name.trim().isNotEmpty == true
+                            ? profile!.name.trim()
+                            : 'Manager bloque';
+                        final subtitle =
+                            (profile?.department ?? '').trim().isNotEmpty
+                            ? profile!.department!.trim()
+                            : 'Contact masque';
+                        final initials = title.isNotEmpty
+                            ? title
+                                  .trim()
+                                  .split(RegExp(r'\s+'))
+                                  .take(2)
+                                  .map((part) => part[0])
+                                  .join()
+                                  .toUpperCase()
+                            : 'M';
+
+                        return Container(
+                          padding: const EdgeInsets.all(14),
+                          decoration: BoxDecoration(
+                            color: const Color(0xFFF8FBFF),
+                            borderRadius: BorderRadius.circular(22),
+                            border: Border.all(color: const Color(0xFFD7E4FF)),
+                          ),
+                          child: Row(
+                            children: [
+                              CircleAvatar(
+                                radius: 24,
+                                backgroundColor: kMessagesSoftBlue,
+                                child: Text(
+                                  initials,
+                                  style: const TextStyle(
+                                    color: kMessagesBlue,
+                                    fontWeight: FontWeight.w800,
+                                  ),
+                                ),
+                              ),
+                              const SizedBox(width: 12),
+                              Expanded(
+                                child: Column(
+                                  crossAxisAlignment: CrossAxisAlignment.start,
+                                  children: [
+                                    Text(
+                                      title,
+                                      maxLines: 1,
+                                      overflow: TextOverflow.ellipsis,
+                                      style: const TextStyle(
+                                        color: kMessagesText,
+                                        fontSize: 14.5,
+                                        fontWeight: FontWeight.w800,
+                                      ),
+                                    ),
+                                    const SizedBox(height: 4),
+                                    Text(
+                                      subtitle,
+                                      maxLines: 1,
+                                      overflow: TextOverflow.ellipsis,
+                                      style: const TextStyle(
+                                        color: kMessagesBody,
+                                        fontSize: 12.8,
+                                        fontWeight: FontWeight.w600,
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                              ),
+                              const SizedBox(width: 10),
+                              ElevatedButton(
+                                onPressed: () async {
+                                  final currentUserId =
+                                      FirebaseAuth.instance.currentUser?.uid;
+                                  if (currentUserId == null) return;
+                                  final conversation = _repository
+                                      .watchConversationSeeds(currentUserId)
+                                      .first;
+                                  final seeds = await conversation;
+                                  String? conversationId;
+                                  for (final seed in seeds) {
+                                    final participants =
+                                        (seed.data['participants'] as List?)
+                                            ?.map((entry) => '$entry')
+                                            .toList() ??
+                                        const <String>[];
+                                    if (participants.contains(userId)) {
+                                      conversationId = seed.id;
+                                      break;
+                                    }
+                                  }
+                                  if (conversationId == null) return;
+                                  await _repository.unblockUser(
+                                    conversationId: conversationId,
+                                    unblockedUserId: userId,
+                                  );
+                                  await _loadCurrentProfile();
+                                  if (!context.mounted) return;
+                                  Navigator.pop(context);
+                                  _showSnack('Manager debloque');
+                                },
+                                style: ElevatedButton.styleFrom(
+                                  backgroundColor: kMessagesBlue,
+                                  foregroundColor: Colors.white,
+                                  elevation: 0,
+                                  shape: RoundedRectangleBorder(
+                                    borderRadius: BorderRadius.circular(16),
+                                  ),
+                                ),
+                                child: const Text(
+                                  'Debloquer',
+                                  style: TextStyle(fontWeight: FontWeight.w800),
+                                ),
+                              ),
+                            ],
+                          ),
+                        );
+                      },
+                    ),
+                  ),
               ],
             ),
           ),
@@ -374,16 +714,13 @@ class _MessagesScreenState extends State<MessagesScreen> {
               );
             }
 
+            final hydrationFuture = _resolveHydratedConversations(
+              currentUserId: currentUserId,
+              seeds: snapshot.data!,
+            );
+
             return FutureBuilder<List<ConversationSummary>>(
-              future: Future.wait(
-                snapshot.data!.map(
-                  (seed) => _repository.hydrateConversation(
-                    currentUserId: currentUserId,
-                    conversationId: seed.id,
-                    data: seed.data,
-                  ),
-                ),
-              ),
+              future: hydrationFuture,
               builder: (context, hydratedSnapshot) {
                 if (hydratedSnapshot.hasError) {
                   return _MessagesErrorState(
@@ -417,7 +754,7 @@ class _MessagesScreenState extends State<MessagesScreen> {
                       loadingProfile: _loadingProfile,
                       hasUnread: unreadCount > 0,
                       onNotificationTap: () =>
-                          _showSnack('Aucune notification supplementaire'),
+                          _openNotificationsPage(allConversations),
                     ),
                     const SizedBox(height: 18),
                     Row(
@@ -798,6 +1135,18 @@ class _ConversationCard extends StatelessWidget {
   final VoidCallback onTap;
   final VoidCallback onLongPress;
 
+  static bool _hasUnread(ConversationSummary c) {
+    if (c.unreadCount > 0) return true;
+    final lastMessageAt = c.rawData['lastMessageAt'];
+    if (lastMessageAt is! Timestamp) return false;
+    final lastReadAt = c.rawData['lastReadAt'];
+    if (lastReadAt is! Map) return true;
+    final uid = FirebaseAuth.instance.currentUser?.uid ?? '';
+    final myLastRead = lastReadAt[uid];
+    if (myLastRead is! Timestamp) return true;
+    return lastMessageAt.compareTo(myLastRead) > 0;
+  }
+
   @override
   Widget build(BuildContext context) {
     return InkWell(
@@ -880,32 +1229,23 @@ class _ConversationCard extends StatelessWidget {
             ),
             const SizedBox(width: 10),
             Column(
+              mainAxisAlignment: MainAxisAlignment.center,
               children: [
-                if (conversation.unreadCount > 0)
+                if (_hasUnread(conversation))
                   Container(
-                    width: 28,
-                    height: 28,
+                    width: 10,
+                    height: 10,
                     decoration: const BoxDecoration(
-                      color: kMessagesBlue,
+                      color: Color(0xFFFF3B30),
                       shape: BoxShape.circle,
                     ),
-                    child: Center(
-                      child: Text(
-                        '${conversation.unreadCount}',
-                        style: const TextStyle(
-                          color: Colors.white,
-                          fontSize: 12,
-                          fontWeight: FontWeight.w800,
-                        ),
-                      ),
-                    ),
+                  )
+                else
+                  const Icon(
+                    LucideIcons.moreVertical,
+                    color: kMessagesMuted,
+                    size: 18,
                   ),
-                const SizedBox(height: 10),
-                const Icon(
-                  LucideIcons.moreVertical,
-                  color: kMessagesMuted,
-                  size: 18,
-                ),
               ],
             ),
           ],
@@ -1141,6 +1481,301 @@ class _MessagesErrorState extends StatelessWidget {
   }
 }
 
+class NotificationsScreen extends StatelessWidget {
+  const NotificationsScreen({
+    super.key,
+    required this.currentProfile,
+    required this.conversations,
+  });
+
+  final ProfileSummary? currentProfile;
+  final List<ConversationSummary> conversations;
+
+  List<_NotificationEntry> _buildEntries() {
+    final entries = <_NotificationEntry>[];
+    for (final conversation in conversations) {
+      if (conversation.unreadCount > 0) {
+        entries.add(
+          _NotificationEntry(
+            title: conversation.title,
+            subtitle: conversation.isMission
+                ? 'Mission avec messages non lus'
+                : 'Conversation avec messages non lus',
+            preview: conversation.preview,
+            updatedAt: conversation.updatedAt,
+            icon: conversation.isMission
+                ? LucideIcons.briefcase
+                : LucideIcons.messageCircle,
+            accentColor: conversation.isMission
+                ? kMessagesWarning
+                : kMessagesBlue,
+            conversationId: conversation.id,
+            profile: conversation.otherProfile,
+          ),
+        );
+      } else if (conversation.isMission) {
+        entries.add(
+          _NotificationEntry(
+            title: conversation.title,
+            subtitle: 'Suivi de mission',
+            preview: conversation.preview,
+            updatedAt: conversation.updatedAt,
+            icon: LucideIcons.briefcaseBusiness,
+            accentColor: kMessagesSuccess,
+            conversationId: conversation.id,
+            profile: conversation.otherProfile,
+          ),
+        );
+      }
+    }
+
+    entries.sort((a, b) {
+      final aDate = a.updatedAt ?? DateTime.fromMillisecondsSinceEpoch(0);
+      final bDate = b.updatedAt ?? DateTime.fromMillisecondsSinceEpoch(0);
+      return bDate.compareTo(aDate);
+    });
+    return entries;
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final entries = _buildEntries();
+
+    return Scaffold(
+      backgroundColor: kMessagesPageBg,
+      body: SafeArea(
+        child: Column(
+          children: [
+            Padding(
+              padding: const EdgeInsets.fromLTRB(18, 16, 18, 12),
+              child: Row(
+                children: [
+                  _RoundIconButton(
+                    icon: LucideIcons.arrowLeft,
+                    onTap: () => Navigator.pop(context),
+                  ),
+                  const SizedBox(width: 12),
+                  const Expanded(
+                    child: Text(
+                      'Notifications',
+                      style: TextStyle(
+                        color: kMessagesText,
+                        fontSize: 24,
+                        fontWeight: FontWeight.w800,
+                      ),
+                    ),
+                  ),
+                  _AvatarCircle(profile: currentProfile, size: 46),
+                ],
+              ),
+            ),
+            Expanded(
+              child: entries.isEmpty
+                  ? const _NotificationsEmptyState()
+                  : ListView.separated(
+                      padding: const EdgeInsets.fromLTRB(18, 8, 18, 24),
+                      itemBuilder: (context, index) {
+                        final entry = entries[index];
+                        return _NotificationCard(entry: entry);
+                      },
+                      separatorBuilder: (_, _) => const SizedBox(height: 12),
+                      itemCount: entries.length,
+                    ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _NotificationEntry {
+  const _NotificationEntry({
+    required this.title,
+    required this.subtitle,
+    required this.preview,
+    required this.updatedAt,
+    required this.icon,
+    required this.accentColor,
+    required this.conversationId,
+    required this.profile,
+  });
+
+  final String title;
+  final String subtitle;
+  final String preview;
+  final DateTime? updatedAt;
+  final IconData icon;
+  final Color accentColor;
+  final String conversationId;
+  final ProfileSummary? profile;
+}
+
+class _NotificationCard extends StatelessWidget {
+  const _NotificationCard({required this.entry});
+
+  final _NotificationEntry entry;
+
+  @override
+  Widget build(BuildContext context) {
+    return InkWell(
+      onTap: () {
+        Navigator.of(context).push(
+          MaterialPageRoute(
+            builder: (_) =>
+                ChatDetailScreen(conversationId: entry.conversationId),
+          ),
+        );
+      },
+      borderRadius: BorderRadius.circular(24),
+      child: Ink(
+        padding: const EdgeInsets.all(16),
+        decoration: BoxDecoration(
+          color: Colors.white,
+          borderRadius: BorderRadius.circular(24),
+          border: Border.all(color: kMessagesBorder),
+          boxShadow: const [
+            BoxShadow(
+              color: Color(0x0C0F172A),
+              blurRadius: 18,
+              offset: Offset(0, 8),
+            ),
+          ],
+        ),
+        child: Row(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Stack(
+              clipBehavior: Clip.none,
+              children: [
+                _AvatarCircle(profile: entry.profile, size: 54),
+                Positioned(
+                  right: -2,
+                  bottom: -2,
+                  child: Container(
+                    width: 24,
+                    height: 24,
+                    decoration: BoxDecoration(
+                      color: entry.accentColor,
+                      shape: BoxShape.circle,
+                      border: Border.all(color: Colors.white, width: 2),
+                    ),
+                    child: Icon(entry.icon, color: Colors.white, size: 12),
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(width: 14),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Row(
+                    children: [
+                      Expanded(
+                        child: Text(
+                          entry.title,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: const TextStyle(
+                            color: kMessagesText,
+                            fontSize: 15.5,
+                            fontWeight: FontWeight.w800,
+                          ),
+                        ),
+                      ),
+                      const SizedBox(width: 8),
+                      Text(
+                        _formatConversationTime(entry.updatedAt),
+                        style: const TextStyle(
+                          color: kMessagesMuted,
+                          fontSize: 12,
+                          fontWeight: FontWeight.w700,
+                        ),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 4),
+                  Text(
+                    entry.subtitle,
+                    style: TextStyle(
+                      color: entry.accentColor,
+                      fontSize: 12.8,
+                      fontWeight: FontWeight.w700,
+                    ),
+                  ),
+                  const SizedBox(height: 6),
+                  Text(
+                    entry.preview.isEmpty
+                        ? 'Nouvelle activité disponible.'
+                        : entry.preview,
+                    maxLines: 2,
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(
+                      color: kMessagesBody,
+                      fontSize: 13.6,
+                      fontWeight: FontWeight.w500,
+                      height: 1.45,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _NotificationsEmptyState extends StatelessWidget {
+  const _NotificationsEmptyState();
+
+  @override
+  Widget build(BuildContext context) {
+    return Center(
+      child: Padding(
+        padding: const EdgeInsets.all(24),
+        child: Container(
+          padding: const EdgeInsets.all(24),
+          decoration: BoxDecoration(
+            color: Colors.white,
+            borderRadius: BorderRadius.circular(28),
+            border: Border.all(color: kMessagesBorder),
+          ),
+          child: const Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(LucideIcons.bellRing, color: kMessagesBlue, size: 30),
+              SizedBox(height: 14),
+              Text(
+                'Aucune notification',
+                textAlign: TextAlign.center,
+                style: TextStyle(
+                  color: kMessagesText,
+                  fontSize: 20,
+                  fontWeight: FontWeight.w800,
+                ),
+              ),
+              SizedBox(height: 8),
+              Text(
+                'Les messages non lus et les activités liées à vos missions apparaîtront ici.',
+                textAlign: TextAlign.center,
+                style: TextStyle(
+                  color: kMessagesBody,
+                  fontSize: 13.6,
+                  height: 1.5,
+                  fontWeight: FontWeight.w500,
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
 class _SheetActionTile extends StatelessWidget {
   const _SheetActionTile({
     required this.icon,
@@ -1212,8 +1847,6 @@ class _MessagesBottomNav extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final uid = FirebaseAuth.instance.currentUser?.uid ?? '';
-
     return Container(
       decoration: const BoxDecoration(
         color: Colors.white,
@@ -1249,12 +1882,12 @@ class _MessagesBottomNav extends StatelessWidget {
                 ),
               ),
               Expanded(
-                child: _BottomNavItemWithBadge(
-                  icon: LucideIcons.messageCircle,
-                  label: 'Messages',
+                child: UnreadMessagesNavItem(
                   active: true,
+                  activeColor: kMessagesBlue,
+                  inactiveColor: kMessagesMuted,
+                  indicatorColor: kMessagesBlue,
                   onTap: onMessagesTap,
-                  uid: uid,
                 ),
               ),
               Expanded(
@@ -1267,96 +1900,6 @@ class _MessagesBottomNav extends StatelessWidget {
               ),
             ],
           ),
-        ),
-      ),
-    );
-  }
-}
-
-class _BottomNavItemWithBadge extends StatelessWidget {
-  const _BottomNavItemWithBadge({
-    required this.icon,
-    required this.label,
-    required this.active,
-    required this.onTap,
-    required this.uid,
-  });
-
-  final IconData icon;
-  final String label;
-  final bool active;
-  final VoidCallback onTap;
-  final String uid;
-
-  @override
-  Widget build(BuildContext context) {
-    final color = active ? kMessagesBlue : kMessagesMuted;
-    return InkWell(
-      onTap: onTap,
-      borderRadius: BorderRadius.circular(16),
-      child: Padding(
-        padding: const EdgeInsets.symmetric(vertical: 4),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            StreamBuilder<QuerySnapshot>(
-              stream: uid.isEmpty
-                  ? const Stream.empty()
-                  : FirebaseFirestore.instance
-                        .collection('conversations')
-                        .where('participants', arrayContains: uid)
-                        .snapshots(),
-              builder: (context, snapshot) {
-                bool hasUnread = false;
-                if (snapshot.hasData) {
-                  hasUnread = snapshot.data!.docs.any((doc) {
-                    final data = doc.data() as Map<String, dynamic>;
-                    final unreadBy =
-                        data['unreadBy'] as Map<String, dynamic>? ?? {};
-                    return (unreadBy[uid] ?? 0) > 0;
-                  });
-                }
-                return Stack(
-                  clipBehavior: Clip.none,
-                  children: [
-                    Icon(icon, color: color, size: 21),
-                    if (hasUnread)
-                      Positioned(
-                        top: -2,
-                        right: -4,
-                        child: Container(
-                          width: 8,
-                          height: 8,
-                          decoration: const BoxDecoration(
-                            color: Color(0xFFFF3B30),
-                            shape: BoxShape.circle,
-                          ),
-                        ),
-                      ),
-                  ],
-                );
-              },
-            ),
-            const SizedBox(height: 4),
-            Text(
-              label,
-              style: TextStyle(
-                color: color,
-                fontSize: 12.5,
-                fontWeight: active ? FontWeight.w800 : FontWeight.w600,
-              ),
-            ),
-            const SizedBox(height: 5),
-            AnimatedContainer(
-              duration: const Duration(milliseconds: 180),
-              width: active ? 26 : 0,
-              height: 3,
-              decoration: BoxDecoration(
-                color: kMessagesBlue,
-                borderRadius: BorderRadius.circular(999),
-              ),
-            ),
-          ],
         ),
       ),
     );

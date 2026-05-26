@@ -1,6 +1,7 @@
-﻿// ignore_for_file: unused_element
+// ignore_for_file: unused_element
 
 import 'dart:convert';
+import 'dart:io';
 
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:flutter/material.dart';
@@ -8,9 +9,12 @@ import 'package:flutter/services.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:hotel_lux_profile/services/vps_media_service.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
+import 'package:open_file/open_file.dart';
+import 'package:path_provider/path_provider.dart';
+import 'package:pdfx/pdfx.dart';
 import 'package:url_launcher/url_launcher.dart';
 
-// ── Local constants ────────────────────────────────────────────────────────────
+//   Local constants
 const _kProfBg = Color(0xFF070707);
 const _kProfCard = Color(0xFF111111);
 const _kProfGoldBorder = Color(0x44D6A85A);
@@ -20,14 +24,10 @@ const _kGold = Color(0xFFD6A85A);
 const _kGoldDark = Color(0xFFC49240);
 const _kGoldLight = Color(0xFFF5E3B8);
 
-// ═══════════════════════════════════════════════════════════════════════════════
 // Screen
-// ═══════════════════════════════════════════════════════════════════════════════
 
 class _WorkerAvatarFallback extends StatelessWidget {
-  const _WorkerAvatarFallback({
-    required this.initials,
-  });
+  const _WorkerAvatarFallback({required this.initials});
 
   final String initials;
 
@@ -99,14 +99,34 @@ class _IntervenantProfileScreenState extends State<IntervenantProfileScreen> {
         content: Text(
           message,
           style: GoogleFonts.inter(
-              color: Colors.white, fontWeight: FontWeight.w500),
+            color: Colors.white,
+            fontWeight: FontWeight.w500,
+          ),
         ),
       ),
     );
   }
 
+  Future<void> _downloadPdf({
+    required Uint8List pdfBytes,
+    required String fileName,
+  }) async {
+    try {
+      final normalizedName = fileName.trim().isEmpty
+          ? 'CV.pdf'
+          : fileName.trim();
+      final dir = await getApplicationDocumentsDirectory();
+      final file = File('${dir.path}/$normalizedName');
+      await file.writeAsBytes(pdfBytes, flush: true);
+      await OpenFile.open(file.path);
+    } catch (_) {
+      if (!mounted) return;
+      _showSnack('Impossible de télécharger ce PDF pour le moment.');
+    }
+  }
+
   void _handleChoose() {
-    final name = (_data?['username'] as String?)?.trim() ?? 'cet intervenant';
+    final name = _resolvedWorkerName(_data) ?? 'cet intervenant';
     showDialog(
       context: context,
       builder: (_) => AlertDialog(
@@ -175,7 +195,6 @@ class _IntervenantProfileScreenState extends State<IntervenantProfileScreen> {
     );
   }
 
-
   Future<void> _launchDialer(String phone) async {
     final cleaned = phone.replaceAll(RegExp(r'[^0-9+]'), '');
     final uri = Uri(scheme: 'tel', path: cleaned);
@@ -213,11 +232,11 @@ class _IntervenantProfileScreenState extends State<IntervenantProfileScreen> {
       backgroundColor: _kProfBg,
       body: _isLoading
           ? const Center(
-              child:
-                  CircularProgressIndicator(color: _kGold, strokeWidth: 2))
+              child: CircularProgressIndicator(color: _kGold, strokeWidth: 2),
+            )
           : _error != null
-              ? _buildError()
-              : _buildContent(),
+          ? _buildError()
+          : _buildContent(),
     );
   }
 
@@ -226,8 +245,11 @@ class _IntervenantProfileScreenState extends State<IntervenantProfileScreen> {
       child: Column(
         mainAxisSize: MainAxisSize.min,
         children: [
-          Icon(LucideIcons.userX,
-              color: Colors.white.withValues(alpha: 0.35), size: 48),
+          Icon(
+            LucideIcons.userX,
+            color: Colors.white.withValues(alpha: 0.35),
+            size: 48,
+          ),
           const SizedBox(height: 16),
           Text(
             _error!,
@@ -249,7 +271,9 @@ class _IntervenantProfileScreenState extends State<IntervenantProfileScreen> {
               child: Text(
                 'Retour',
                 style: GoogleFonts.inter(
-                    color: _kGold, fontWeight: FontWeight.w600),
+                  color: _kGold,
+                  fontWeight: FontWeight.w600,
+                ),
               ),
             ),
           ),
@@ -260,9 +284,10 @@ class _IntervenantProfileScreenState extends State<IntervenantProfileScreen> {
 
   Widget _buildContent() {
     final data = _data!;
-    final name = ((data['username'] as String?)?.trim()) ?? '';
+    final name = _resolvedWorkerName(data) ?? '';
     final department = ((data['department'] as String?)?.trim()) ?? '';
-    final directSpecialty = ((data['specialty'] as String?)?.trim()) ??
+    final directSpecialty =
+        ((data['specialty'] as String?)?.trim()) ??
         ((data['speciality'] as String?)?.trim()) ??
         '';
     final specialties = _parseStringList(data['specialties']);
@@ -283,7 +308,13 @@ class _IntervenantProfileScreenState extends State<IntervenantProfileScreen> {
     final expYears = (data['departmentExperienceYears'] as num?)?.toInt();
     final address = ((data['address'] as String?)?.trim()) ?? '';
     final photoBase64 = (data['photoBase64'] as String?)?.trim();
-    final photoUrl = VpsMediaService.resolveProfileImageUrl(data);
+    final photoUrl =
+        VpsMediaService.resolveProfileImageUrl(data) ??
+        _firstNonEmptyString([
+          data['workerPhotoUrl'],
+          data['ownerPhotoUrl'],
+          data['avatarUrl'],
+        ]);
     final photoBytes = _decodeBase64(photoBase64);
     final initials = _workerInitials(name);
 
@@ -362,17 +393,22 @@ class _IntervenantProfileScreenState extends State<IntervenantProfileScreen> {
                 if (name.isNotEmpty)
                   _InfoRow(label: 'Nom complet', value: name),
                 _InfoRow(
-                    label: 'Email', value: (data['email'] as String?)?.trim()),
+                  label: 'Email',
+                  value: (data['email'] as String?)?.trim(),
+                ),
                 _InfoRow(
-                    label: 'Téléphone',
-                    value: (data['phone'] as String?)?.trim()),
+                  label: 'Téléphone',
+                  value: (data['phone'] as String?)?.trim(),
+                ),
                 _InfoRow(
-                    label: 'Adresse',
-                    value: address.isNotEmpty ? address : null),
+                  label: 'Adresse',
+                  value: address.isNotEmpty ? address : null,
+                ),
                 _InfoRow(
-                    label: 'Date de naissance',
-                    value: (data['dob'] as String?)?.trim(),
-                    isLast: true),
+                  label: 'Date de naissance',
+                  value: (data['dob'] as String?)?.trim(),
+                  isLast: true,
+                ),
               ],
             ),
           ),
@@ -398,18 +434,22 @@ class _IntervenantProfileScreenState extends State<IntervenantProfileScreen> {
                 ),
                 if (expYears != null)
                   _InfoRow(
-                      label: 'Expérience',
-                      value: '$expYears an${expYears > 1 ? "s" : ""}'),
+                    label: 'Expérience',
+                    value: '$expYears an${expYears > 1 ? "s" : ""}',
+                  ),
                 _InfoRow(
-                    label: 'Poste actuel',
-                    value: (data['jobLocation'] as String?)?.trim()),
+                  label: 'Poste actuel',
+                  value: (data['jobLocation'] as String?)?.trim(),
+                ),
                 _InfoRow(
-                    label: 'Lieu de travail',
-                    value: (data['jobAddress'] as String?)?.trim()),
+                  label: 'Lieu de travail',
+                  value: (data['jobAddress'] as String?)?.trim(),
+                ),
                 _InfoRow(
-                    label: 'Date de début',
-                    value: (data['jobStartDate'] as String?)?.trim(),
-                    isLast: !showSpecialtiesSection),
+                  label: 'Date de début',
+                  value: (data['jobStartDate'] as String?)?.trim(),
+                  isLast: !showSpecialtiesSection,
+                ),
               ],
               extraChild: showSpecialtiesSection
                   ? Padding(
@@ -443,26 +483,23 @@ class _IntervenantProfileScreenState extends State<IntervenantProfileScreen> {
         ],
         // Availability card — only if slots are non-empty
         if (availSlots.isNotEmpty) ...[
-          SliverToBoxAdapter(
-            child: _AvailabilityCard(slots: availSlots),
-          ),
+          SliverToBoxAdapter(child: _AvailabilityCard(slots: availSlots)),
           const SliverToBoxAdapter(child: SizedBox(height: 12)),
         ],
         // Languages card — only if at least one language is true
         if (speaksFrench || speaksEnglish) ...[
           SliverToBoxAdapter(
             child: _LanguagesCard(
-                speaksFrench: speaksFrench, speaksEnglish: speaksEnglish),
+              speaksFrench: speaksFrench,
+              speaksEnglish: speaksEnglish,
+            ),
           ),
           const SliverToBoxAdapter(child: SizedBox(height: 12)),
         ],
         // Verifications card — only if at least one verified field is true
         if (_hasAnyVerification(quest: quest, cvReviewAuth: cvReviewAuth)) ...[
           SliverToBoxAdapter(
-            child: _VerificationsCard(
-              cvReviewAuth: cvReviewAuth,
-              quest: quest,
-            ),
+            child: _VerificationsCard(cvReviewAuth: cvReviewAuth, quest: quest),
           ),
           const SliverToBoxAdapter(child: SizedBox(height: 12)),
         ],
@@ -475,17 +512,18 @@ class _IntervenantProfileScreenState extends State<IntervenantProfileScreen> {
               cvReviewAuth: cvReviewAuth,
               onFullScreen: cvBytes != null
                   ? () => Navigator.push(
-                        context,
-                        MaterialPageRoute(
-                          builder: (_) => _PdfFullScreenPage(
-                            pdfBytes: cvBytes,
-                            fileName: cvFileName,
-                          ),
+                      context,
+                      MaterialPageRoute(
+                        builder: (_) => _PdfFullScreenPage(
+                          pdfBytes: cvBytes,
+                          fileName: cvFileName,
                         ),
-                      )
+                      ),
+                    )
                   : null,
-              onDownload: () =>
-                  _showSnack('Téléchargement bientôt disponible.'),
+              onDownload: cvBytes == null
+                  ? () => _showSnack('CV indisponible.')
+                  : () => _downloadPdf(pdfBytes: cvBytes, fileName: cvFileName),
             ),
           ),
           const SliverToBoxAdapter(child: SizedBox(height: 12)),
@@ -496,9 +534,9 @@ class _IntervenantProfileScreenState extends State<IntervenantProfileScreen> {
   }
 }
 
-// ═══════════════════════════════════════════════════════════════════════════════
+//
 // Hero section
-// ═══════════════════════════════════════════════════════════════════════════════
+//
 
 class _ProfileHeroSection extends StatelessWidget {
   const _ProfileHeroSection({
@@ -535,7 +573,7 @@ class _ProfileHeroSection extends StatelessWidget {
           Image.asset(
             'lib/assets/interventfilterheroimg.webp',
             fit: BoxFit.cover,
-            errorBuilder: (_, __, ___) =>
+            errorBuilder: (context, error, stackTrace) =>
                 const ColoredBox(color: Color(0xFF0A0A0A)),
           ),
           DecoratedBox(
@@ -601,8 +639,9 @@ class _ProfileHeroSection extends StatelessWidget {
                                       photoUrl!,
                                       fit: BoxFit.cover,
                                       filterQuality: FilterQuality.high,
-                                      errorBuilder: (_, __, ___) =>
-                                          photoBytes != null
+                                      errorBuilder:
+                                          (context, error, stackTrace) =>
+                                              photoBytes != null
                                               ? Image.memory(
                                                   photoBytes!,
                                                   fit: BoxFit.cover,
@@ -614,14 +653,12 @@ class _ProfileHeroSection extends StatelessWidget {
                                                 ),
                                     )
                                   : photoBytes != null
-                                      ? Image.memory(
-                                          photoBytes!,
-                                          fit: BoxFit.cover,
-                                          filterQuality: FilterQuality.high,
-                                        )
-                                      : _WorkerAvatarFallback(
-                                          initials: initials,
-                                        ),
+                                  ? Image.memory(
+                                      photoBytes!,
+                                      fit: BoxFit.cover,
+                                      filterQuality: FilterQuality.high,
+                                    )
+                                  : _WorkerAvatarFallback(initials: initials),
                             ),
                           ),
                         ],
@@ -680,8 +717,9 @@ class _ProfileHeroSection extends StatelessWidget {
                                       maxLines: 1,
                                       overflow: TextOverflow.ellipsis,
                                       style: GoogleFonts.inter(
-                                        color: Colors.white
-                                            .withValues(alpha: 0.60),
+                                        color: Colors.white.withValues(
+                                          alpha: 0.60,
+                                        ),
                                         fontSize: 12,
                                       ),
                                     ),
@@ -699,8 +737,9 @@ class _ProfileHeroSection extends StatelessWidget {
                                   Text(
                                     '$expYears an${expYears! > 1 ? "s" : ""}',
                                     style: GoogleFonts.inter(
-                                      color:
-                                          Colors.white.withValues(alpha: 0.60),
+                                      color: Colors.white.withValues(
+                                        alpha: 0.60,
+                                      ),
                                       fontSize: 12,
                                     ),
                                   ),
@@ -722,9 +761,9 @@ class _ProfileHeroSection extends StatelessWidget {
   }
 }
 
-// ═══════════════════════════════════════════════════════════════════════════════
+//
 // Action buttons
-// ═══════════════════════════════════════════════════════════════════════════════
+//
 
 class _PrimaryBtn extends StatelessWidget {
   const _PrimaryBtn({required this.onTap});
@@ -738,9 +777,7 @@ class _PrimaryBtn extends StatelessWidget {
         width: double.infinity,
         height: 54,
         decoration: BoxDecoration(
-          gradient: const LinearGradient(
-            colors: [_kGoldDark, _kGold],
-          ),
+          gradient: const LinearGradient(colors: [_kGoldDark, _kGold]),
           borderRadius: BorderRadius.circular(16),
         ),
         child: Row(
@@ -799,9 +836,9 @@ class _SecondaryBtn extends StatelessWidget {
   }
 }
 
-// ═══════════════════════════════════════════════════════════════════════════════
+//
 // Section card
-// ═══════════════════════════════════════════════════════════════════════════════
+//
 
 class _SectionCard extends StatelessWidget {
   const _SectionCard({
@@ -851,12 +888,13 @@ class _SectionCard extends StatelessWidget {
           ),
           const SizedBox(height: 12),
           Divider(
-              color: Colors.white.withValues(alpha: 0.08),
-              height: 1,
-              thickness: 1),
+            color: Colors.white.withValues(alpha: 0.08),
+            height: 1,
+            thickness: 1,
+          ),
           const SizedBox(height: 8),
           ...rows,
-          if (extraChild != null) extraChild!,
+          ...?(extraChild == null ? null : <Widget>[extraChild!]),
         ],
       ),
     );
@@ -916,9 +954,10 @@ class _InfoRow extends StatelessWidget {
         ),
         if (!isLast)
           Divider(
-              color: Colors.white.withValues(alpha: 0.06),
-              height: 1,
-              thickness: 1),
+            color: Colors.white.withValues(alpha: 0.06),
+            height: 1,
+            thickness: 1,
+          ),
       ],
     );
   }
@@ -949,9 +988,9 @@ class _SpecialtyChip extends StatelessWidget {
   }
 }
 
-// ═══════════════════════════════════════════════════════════════════════════════
+//
 // Availability card
-// ═══════════════════════════════════════════════════════════════════════════════
+//
 
 class _AvailabilityCard extends StatelessWidget {
   const _AvailabilityCard({required this.slots});
@@ -992,9 +1031,10 @@ class _AvailabilityCard extends StatelessWidget {
           ),
           const SizedBox(height: 12),
           Divider(
-              color: Colors.white.withValues(alpha: 0.08),
-              height: 1,
-              thickness: 1),
+            color: Colors.white.withValues(alpha: 0.08),
+            height: 1,
+            thickness: 1,
+          ),
           const SizedBox(height: 10),
           if (slots.isEmpty)
             const _EmptyState(label: 'Disponibilités non renseignées')
@@ -1003,7 +1043,8 @@ class _AvailabilityCard extends StatelessWidget {
               spacing: 6,
               runSpacing: 6,
               children: slots.map((slot) {
-                final isAlways = slot.toLowerCase().contains('toujours') ||
+                final isAlways =
+                    slot.toLowerCase().contains('toujours') ||
                     slot.toLowerCase().contains('tous les jours');
                 return _AvailPill(label: slot, isGreen: isAlways);
               }).toList(),
@@ -1057,13 +1098,15 @@ class _AvailPill extends StatelessWidget {
   }
 }
 
-// ═══════════════════════════════════════════════════════════════════════════════
+//
 // Languages card
-// ═══════════════════════════════════════════════════════════════════════════════
+//
 
 class _LanguagesCard extends StatelessWidget {
-  const _LanguagesCard(
-      {required this.speaksFrench, required this.speaksEnglish});
+  const _LanguagesCard({
+    required this.speaksFrench,
+    required this.speaksEnglish,
+  });
   final bool speaksFrench;
   final bool speaksEnglish;
 
@@ -1103,9 +1146,10 @@ class _LanguagesCard extends StatelessWidget {
           ),
           const SizedBox(height: 12),
           Divider(
-              color: Colors.white.withValues(alpha: 0.08),
-              height: 1,
-              thickness: 1),
+            color: Colors.white.withValues(alpha: 0.08),
+            height: 1,
+            thickness: 1,
+          ),
           const SizedBox(height: 8),
           if (!hasAny)
             const _EmptyState(label: 'Langues non renseignées')
@@ -1144,24 +1188,28 @@ class _LangRow extends StatelessWidget {
                 ),
               ),
               const Spacer(),
-              const Icon(LucideIcons.checkCircle2,
-                  color: _kProfGreen, size: 18),
+              const Icon(
+                LucideIcons.checkCircle2,
+                color: _kProfGreen,
+                size: 18,
+              ),
             ],
           ),
         ),
         if (!isLast)
           Divider(
-              color: Colors.white.withValues(alpha: 0.06),
-              height: 1,
-              thickness: 1),
+            color: Colors.white.withValues(alpha: 0.06),
+            height: 1,
+            thickness: 1,
+          ),
       ],
     );
   }
 }
 
-// ═══════════════════════════════════════════════════════════════════════════════
+//
 // Verifications card
-// ═══════════════════════════════════════════════════════════════════════════════
+//
 
 class _VerificationsCard extends StatelessWidget {
   const _VerificationsCard({required this.cvReviewAuth, required this.quest});
@@ -1209,47 +1257,54 @@ class _VerificationsCard extends StatelessWidget {
           ),
           const SizedBox(height: 12),
           Divider(
-              color: Colors.white.withValues(alpha: 0.08),
-              height: 1,
-              thickness: 1),
+            color: Colors.white.withValues(alpha: 0.08),
+            height: 1,
+            thickness: 1,
+          ),
           const SizedBox(height: 8),
           // Only show boolean verification rows when confirmed true
           if (authorizedCanada == true)
             _VerifRow(
-                label: 'Autorisé à travailler au Canada',
-                value: true,
-                isLast: isAdult != true &&
-                    noCriminal != true &&
-                    referred != true &&
-                    !cvReviewAuth),
+              label: 'Autorisé à travailler au Canada',
+              value: true,
+              isLast:
+                  isAdult != true &&
+                  noCriminal != true &&
+                  referred != true &&
+                  !cvReviewAuth,
+            ),
           if (isAdult == true)
             _VerifRow(
-                label: 'Majeur (18 ans et plus)',
-                value: true,
-                isLast: noCriminal != true &&
-                    referred != true &&
-                    !cvReviewAuth),
+              label: 'Majeur (18 ans et plus)',
+              value: true,
+              isLast: noCriminal != true && referred != true && !cvReviewAuth,
+            ),
           if (noCriminal == true)
             _VerifRow(
-                label: 'Aucun casier judiciaire',
-                value: true,
-                isLast: referred != true && !cvReviewAuth),
+              label: 'Aucun casier judiciaire',
+              value: true,
+              isLast: referred != true && !cvReviewAuth,
+            ),
           if (referred == true)
             _VerifRow(
-                label: 'Référé par un employé',
-                value: true,
-                isLast: !cvReviewAuth &&
-                    (referralId == null || referralId.isEmpty)),
+              label: 'Référé par un employé',
+              value: true,
+              isLast:
+                  !cvReviewAuth && (referralId == null || referralId.isEmpty),
+            ),
           if (cvReviewAuth)
             _VerifRow(
-                label: 'Autorisation de révision CV',
-                value: true,
-                isLast: referred != true ||
-                    referralId == null ||
-                    referralId.isEmpty),
+              label: 'Autorisation de révision CV',
+              value: true,
+              isLast:
+                  referred != true || referralId == null || referralId.isEmpty,
+            ),
           if (referred == true && referralId != null && referralId.isNotEmpty)
             _VerifRow(
-                label: 'ID du référent', valueText: referralId, isLast: true),
+              label: 'ID du référent',
+              valueText: referralId,
+              isLast: true,
+            ),
         ],
       ),
     );
@@ -1290,11 +1345,17 @@ class _VerifRow extends StatelessWidget {
         ),
       );
     } else if (value!) {
-      trailing =
-          const Icon(LucideIcons.checkCircle2, color: _kProfGreen, size: 18);
+      trailing = const Icon(
+        LucideIcons.checkCircle2,
+        color: _kProfGreen,
+        size: 18,
+      );
     } else {
-      trailing = Icon(LucideIcons.circle,
-          color: _kGold.withValues(alpha: 0.60), size: 18);
+      trailing = Icon(
+        LucideIcons.circle,
+        color: _kGold.withValues(alpha: 0.60),
+        size: 18,
+      );
     }
 
     return Column(
@@ -1321,17 +1382,18 @@ class _VerifRow extends StatelessWidget {
         ),
         if (!isLast)
           Divider(
-              color: Colors.white.withValues(alpha: 0.06),
-              height: 1,
-              thickness: 1),
+            color: Colors.white.withValues(alpha: 0.06),
+            height: 1,
+            thickness: 1,
+          ),
       ],
     );
   }
 }
 
-// ═══════════════════════════════════════════════════════════════════════════════
+//
 // CV card
-// ═══════════════════════════════════════════════════════════════════════════════
+//
 
 class _CvCard extends StatelessWidget {
   const _CvCard({
@@ -1461,8 +1523,7 @@ class _OutlineButton extends StatelessWidget {
             Text(
               label,
               style: GoogleFonts.inter(
-                color:
-                    enabled ? _kGold : Colors.white.withValues(alpha: 0.30),
+                color: enabled ? _kGold : Colors.white.withValues(alpha: 0.30),
                 fontSize: 13,
                 fontWeight: FontWeight.w500,
               ),
@@ -1475,8 +1536,11 @@ class _OutlineButton extends StatelessWidget {
 }
 
 class _GoldButton extends StatelessWidget {
-  const _GoldButton(
-      {required this.label, required this.icon, required this.onTap});
+  const _GoldButton({
+    required this.label,
+    required this.icon,
+    required this.onTap,
+  });
   final String label;
   final IconData icon;
   final VoidCallback onTap;
@@ -1541,36 +1605,79 @@ class _CvWarningState extends StatelessWidget {
   }
 }
 
-class _PdfInlinePreview extends StatelessWidget {
+class _PdfInlinePreview extends StatefulWidget {
   const _PdfInlinePreview({required this.pdfBytes});
   final Uint8List pdfBytes;
+
+  @override
+  State<_PdfInlinePreview> createState() => _PdfInlinePreviewState();
+}
+
+class _PdfInlinePreviewState extends State<_PdfInlinePreview> {
+  late final PdfControllerPinch _controller;
+
+  @override
+  void initState() {
+    super.initState();
+    _controller = PdfControllerPinch(
+      document: PdfDocument.openData(widget.pdfBytes),
+    );
+  }
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
 
   @override
   Widget build(BuildContext context) {
     return ClipRRect(
       borderRadius: BorderRadius.circular(14),
       child: Container(
-        height: 400,
+        height: 460,
         decoration: BoxDecoration(
-          color: Colors.black12,
+          color: Colors.white,
           borderRadius: BorderRadius.circular(14),
         ),
-        child: const Center(
-          child: Icon(Icons.picture_as_pdf, size: 64, color: Colors.white38),
+        child: PdfViewPinch(
+          controller: _controller,
+          backgroundDecoration: const BoxDecoration(color: Colors.white),
         ),
       ),
     );
   }
 }
 
-// ═══════════════════════════════════════════════════════════════════════════════
+//
 // Full screen PDF page
-// ═══════════════════════════════════════════════════════════════════════════════
+//
 
-class _PdfFullScreenPage extends StatelessWidget {
+class _PdfFullScreenPage extends StatefulWidget {
   const _PdfFullScreenPage({required this.pdfBytes, required this.fileName});
   final Uint8List pdfBytes;
   final String fileName;
+
+  @override
+  State<_PdfFullScreenPage> createState() => _PdfFullScreenPageState();
+}
+
+class _PdfFullScreenPageState extends State<_PdfFullScreenPage> {
+  late final PdfControllerPinch _controller;
+
+  @override
+  void initState() {
+    super.initState();
+    _controller = PdfControllerPinch(
+      document: PdfDocument.openData(widget.pdfBytes),
+    );
+  }
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -1580,12 +1687,15 @@ class _PdfFullScreenPage extends StatelessWidget {
         backgroundColor: const Color(0xFF111111),
         elevation: 0,
         leading: IconButton(
-          icon:
-              const Icon(LucideIcons.arrowLeft, color: Colors.white, size: 20),
+          icon: const Icon(
+            LucideIcons.arrowLeft,
+            color: Colors.white,
+            size: 20,
+          ),
           onPressed: () => Navigator.pop(context),
         ),
         title: Text(
-          fileName,
+          widget.fileName,
           style: GoogleFonts.inter(
             color: Colors.white,
             fontSize: 14,
@@ -1595,24 +1705,28 @@ class _PdfFullScreenPage extends StatelessWidget {
         actions: [
           Padding(
             padding: const EdgeInsets.only(right: 16),
-            child: Icon(LucideIcons.maximize2,
-                color: Colors.white.withValues(alpha: 0.55), size: 18),
+            child: Icon(
+              LucideIcons.maximize2,
+              color: Colors.white.withValues(alpha: 0.55),
+              size: 18,
+            ),
           ),
         ],
       ),
       body: Container(
-        color: Colors.black,
-        child: const Center(
-          child: Icon(Icons.picture_as_pdf, size: 80, color: Colors.white38),
+        color: const Color(0xFF151515),
+        child: PdfViewPinch(
+          controller: _controller,
+          backgroundDecoration: const BoxDecoration(color: Color(0xFF151515)),
         ),
       ),
     );
   }
 }
 
-// ═══════════════════════════════════════════════════════════════════════════════
+//
 // Contact bottom sheet
-// ═══════════════════════════════════════════════════════════════════════════════
+//
 
 class _ContactSheet extends StatelessWidget {
   const _ContactSheet({this.phone, this.email});
@@ -1629,7 +1743,9 @@ class _ContactSheet extends StatelessWidget {
         content: Text(
           '$label copié',
           style: GoogleFonts.inter(
-              color: Colors.white, fontWeight: FontWeight.w500),
+            color: Colors.white,
+            fontWeight: FontWeight.w500,
+          ),
         ),
       ),
     );
@@ -1778,9 +1894,9 @@ class _ContactRow extends StatelessWidget {
   }
 }
 
-// ═══════════════════════════════════════════════════════════════════════════════
+//
 // Small shared widgets
-// ═══════════════════════════════════════════════════════════════════════════════
+//
 
 class _CircleBtn extends StatelessWidget {
   const _CircleBtn({required this.icon, required this.onTap});
@@ -1833,10 +1949,7 @@ class _AvailabilityBadge extends StatelessWidget {
           Container(
             width: 7,
             height: 7,
-            decoration: BoxDecoration(
-              color: color,
-              shape: BoxShape.circle,
-            ),
+            decoration: BoxDecoration(color: color, shape: BoxShape.circle),
           ),
           const SizedBox(width: 5),
           Text(
@@ -1873,9 +1986,9 @@ class _EmptyState extends StatelessWidget {
   }
 }
 
-// ═══════════════════════════════════════════════════════════════════════════════
+//
 // Local helpers (duplicated to avoid circular import)
-// ═══════════════════════════════════════════════════════════════════════════════
+//
 
 Uint8List? _decodeBase64(String? rawValue) {
   if (rawValue == null || rawValue.trim().isEmpty) return null;
@@ -1889,9 +2002,28 @@ Uint8List? _decodeBase64(String? rawValue) {
   }
 }
 
+String? _resolvedWorkerName(Map<String, dynamic>? data) {
+  if (data == null) return null;
+  return _firstNonEmptyString([
+    data['username'],
+    data['name'],
+    data['workerName'],
+  ]);
+}
+
+String? _firstNonEmptyString(List<dynamic> values) {
+  for (final value in values) {
+    final text = value?.toString().trim() ?? '';
+    if (text.isNotEmpty) return text;
+  }
+  return null;
+}
+
 String _workerInitials(String name) {
-  final parts =
-      name.split(RegExp(r'\s+')).where((p) => p.trim().isNotEmpty).toList();
+  final parts = name
+      .split(RegExp(r'\s+'))
+      .where((p) => p.trim().isNotEmpty)
+      .toList();
   if (parts.isEmpty) return 'I';
   if (parts.length == 1) return parts.first.characters.first.toUpperCase();
   return '${parts.first.characters.first}${parts.last.characters.first}'
@@ -1944,10 +2076,7 @@ String _resolveWorkerHeadlineHint({
   return 'DEPARTEMENT D\'INTERVENTION';
 }
 
-bool _isWorkerAvailableNow(
-  Map<String, dynamic> data, {
-  DateTime? now,
-}) {
+bool _isWorkerAvailableNow(Map<String, dynamic> data, {DateTime? now}) {
   final current = now ?? DateTime.now();
   final slots = data['availabilitySlots'];
   if (slots is List && slots.isNotEmpty) {
@@ -2000,7 +2129,8 @@ List<String> _parseAvailabilitySlots(Map<String, dynamic> data) {
   final normalized = slots.whereType<Map>().toList();
   if (normalized.isEmpty) return const [];
 
-  final allWeekAlways = normalized.length >= 7 &&
+  final allWeekAlways =
+      normalized.length >= 7 &&
       normalized.every(_isAlwaysAvailableSlot) &&
       normalized
               .map((s) => (s['weekday'] as num?)?.toInt())
@@ -2014,9 +2144,11 @@ List<String> _parseAvailabilitySlots(Map<String, dynamic> data) {
   for (final slot in normalized) {
     final dayLabel = _weekdayLabel((slot['weekday'] as num?)?.toInt());
     if (_isAlwaysAvailableSlot(slot)) {
-      result.add(dayLabel.isNotEmpty
-          ? '$dayLabel • Toujours disponible'
-          : 'Toujours disponible');
+      result.add(
+        dayLabel.isNotEmpty
+            ? '$dayLabel • Toujours disponible'
+            : 'Toujours disponible',
+      );
       continue;
     }
     final from = _formatTime(
@@ -2030,16 +2162,18 @@ List<String> _parseAvailabilitySlots(Map<String, dynamic> data) {
       period: slot['toPeriod']?.toString(),
     );
     if (from != null && to != null) {
-      result
-          .add(dayLabel.isNotEmpty ? '$dayLabel • $from - $to' : '$from - $to');
+      result.add(
+        dayLabel.isNotEmpty ? '$dayLabel • $from - $to' : '$from - $to',
+      );
       continue;
     }
     final existing = (slot['label']?.toString() ?? '').trim();
     if (existing.isNotEmpty) {
       result.add(
-          dayLabel.isNotEmpty && !existing.toLowerCase().startsWith(dayLabel)
-              ? '$dayLabel • $existing'
-              : existing);
+        dayLabel.isNotEmpty && !existing.toLowerCase().startsWith(dayLabel)
+            ? '$dayLabel • $existing'
+            : existing,
+      );
     }
   }
   return result;
@@ -2058,8 +2192,11 @@ bool _isAlwaysAvailableSlot(Map slot) {
       label.contains('toute la journee');
 }
 
-int? _slotMinutes(
-    {required int? hour, required int? minute, required String? period}) {
+int? _slotMinutes({
+  required int? hour,
+  required int? minute,
+  required String? period,
+}) {
   if (hour == null) return null;
   final min = (minute ?? 0).clamp(0, 59);
   final p = (period ?? '').trim().toUpperCase();
@@ -2072,8 +2209,11 @@ int? _slotMinutes(
   return hour * 60 + min;
 }
 
-String? _formatTime(
-    {required int? hour, required int? minute, required String? period}) {
+String? _formatTime({
+  required int? hour,
+  required int? minute,
+  required String? period,
+}) {
   if (hour == null) return null;
   final min = (minute ?? 0).clamp(0, 59);
   final p = (period ?? '').trim().toUpperCase();

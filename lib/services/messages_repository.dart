@@ -14,6 +14,10 @@ class MessagesRepository {
 
   final FirebaseFirestore _firestore;
   final FirebaseAuth _auth;
+  final Map<String, ProfileSummary?> _profileCache =
+      <String, ProfileSummary?>{};
+  final Map<String, Future<ProfileSummary?>> _profileRequestCache =
+      <String, Future<ProfileSummary?>>{};
 
   static const String _threadsCollectionName = 'conversations';
   static const String _itemsSubcollectionName = 'messages';
@@ -85,7 +89,18 @@ class MessagesRepository {
   Future<ProfileSummary?> loadCurrentProfile() async {
     final uid = currentUserId;
     if (uid == null) return null;
-    return _loadProfile(uid);
+    final profile = await _loadProfile(uid);
+    if (profile != null) return profile;
+
+    final user = FirebaseAuth.instance.currentUser;
+    if (user == null) return null;
+    final fallbackName = user.displayName?.trim();
+    return ProfileSummary(
+      userId: uid,
+      name: (fallbackName?.isNotEmpty == true) ? fallbackName! : 'Intervenant',
+      photoUrl: user.photoURL,
+      email: user.email,
+    );
   }
 
   Future<String> ensureWorkerManagerConversation({
@@ -154,7 +169,7 @@ class MessagesRepository {
         .get();
 
     final seen = <String>{};
-    final participants = <ProfileSummary>[];
+    final participantIds = <String>[];
 
     for (final doc in snapshot.docs) {
       final data = doc.data();
@@ -163,10 +178,11 @@ class MessagesRepository {
 
       for (final participantId in _stringList(data['participants'])) {
         if (participantId == uid || !seen.add(participantId)) continue;
-        final profile = await _loadProfile(participantId);
-        if (profile != null) participants.add(profile);
+        participantIds.add(participantId);
       }
     }
+
+    final participants = await _loadProfiles(participantIds);
 
     participants.sort(
       (a, b) => a.name.toLowerCase().compareTo(b.name.toLowerCase()),
@@ -213,6 +229,9 @@ class MessagesRepository {
       'senderId': uid,
       'senderName': creatorProfile?.name ?? 'Utilisateur',
       'senderRole': creatorProfile?.roleLabel,
+      'senderAccountType': creatorProfile?.accountType,
+      'senderPhotoUrl': creatorProfile?.photoUrl,
+      'senderPhotoBase64': creatorProfile?.photoBase64,
       'text': '${creatorProfile?.name ?? 'Utilisateur'} a cree le groupe.',
       'type': 'system',
       'createdAt': FieldValue.serverTimestamp(),
@@ -261,7 +280,9 @@ class MessagesRepository {
       otherProfile = await _loadProfile(otherParticipantIds.first);
     }
 
-    final latestMessage = await _loadLatestMessageFallback(conversationId);
+    final latestMessage = _shouldLoadLatestMessageFallback(data)
+        ? await _loadLatestMessageFallback(conversationId)
+        : null;
     final unreadCount = _unreadCountForUser(data['unreadBy'], currentUserId);
     final title = _resolveConversationTitle(
       data: data,
@@ -352,10 +373,11 @@ class MessagesRepository {
     final uid = currentUserId;
     if (uid == null) return;
 
-    await _threadsCollection.doc(conversationId).set({
-      'unreadBy': {uid: 0},
+    await _threadsCollection.doc(conversationId).update({
+      'unreadBy.$uid': 0,
+      'lastReadAt.$uid': FieldValue.serverTimestamp(),
       'updatedAt': FieldValue.serverTimestamp(),
-    }, SetOptions(merge: true));
+    });
 
     final unreadSnapshot = await _threadsCollection
         .doc(conversationId)
@@ -376,6 +398,17 @@ class MessagesRepository {
     await batch.commit();
   }
 
+  Future<void> touchLastReadAt(String conversationId) async {
+    final uid = currentUserId;
+    if (uid == null) return;
+    try {
+      await _threadsCollection.doc(conversationId).update({
+        'unreadBy.$uid': 0,
+        'lastReadAt.$uid': FieldValue.serverTimestamp(),
+      });
+    } catch (_) {}
+  }
+
   Future<void> sendTextMessage({
     required String conversationId,
     required String text,
@@ -391,6 +424,9 @@ class MessagesRepository {
         'text': trimmed,
         'senderName': currentProfile?.name ?? 'Utilisateur',
         'senderRole': currentProfile?.roleLabel,
+        'senderAccountType': currentProfile?.accountType,
+        'senderPhotoUrl': currentProfile?.photoUrl,
+        'senderPhotoBase64': currentProfile?.photoBase64,
         'seenAt': FieldValue.serverTimestamp(),
       },
       lastMessage: trimmed,
@@ -406,6 +442,10 @@ class MessagesRepository {
     if (uid == null) return;
 
     final conversationRef = _threadsCollection.doc(conversationId);
+    final conversationSnapshot = await conversationRef.get();
+    final conversationData =
+        conversationSnapshot.data() ?? const <String, dynamic>{};
+    final participants = _stringList(conversationData['participants']);
     final messagesRef = conversationRef.collection(_itemsSubcollectionName);
     final messageRef = messagesRef.doc();
     final batch = _firestore.batch();
@@ -426,8 +466,13 @@ class MessagesRepository {
     batch.set(conversationRef, {
       'lastMessage': lastMessage,
       'lastMessageAt': FieldValue.serverTimestamp(),
+      'lastSenderId': uid,
       'updatedAt': FieldValue.serverTimestamp(),
       'unreadBy.$uid': 0,
+      'lastReadAt.$uid': FieldValue.serverTimestamp(),
+      for (final participantId in participants)
+        if (participantId != uid)
+          'unreadBy.$participantId': FieldValue.increment(1),
       'systemBannerText': FieldValue.delete(),
       'systemBannerAt': FieldValue.delete(),
     }, SetOptions(merge: true));
@@ -501,12 +546,69 @@ class MessagesRepository {
     await _firestore.collection('profiles').doc(uid).set({
       'blockedUserIds': FieldValue.arrayUnion([blockedUserId]),
     }, SetOptions(merge: true));
+    _clearProfileCache(uid);
 
     await _threadsCollection.doc(conversationId).set({
       'blockedParticipantIds': FieldValue.arrayUnion([blockedUserId, uid]),
       'blockedBy': FieldValue.arrayUnion([uid]),
       'updatedAt': FieldValue.serverTimestamp(),
     }, SetOptions(merge: true));
+  }
+
+  Future<void> unblockUser({
+    required String conversationId,
+    required String unblockedUserId,
+  }) async {
+    final uid = currentUserId;
+    if (uid == null) return;
+
+    await _firestore.collection('profiles').doc(uid).set({
+      'blockedUserIds': FieldValue.arrayRemove([unblockedUserId]),
+    }, SetOptions(merge: true));
+    _clearProfileCache(uid);
+
+    await _threadsCollection.doc(conversationId).set({
+      'blockedParticipantIds': FieldValue.arrayRemove([unblockedUserId, uid]),
+      'blockedBy': FieldValue.arrayRemove([uid]),
+      'updatedAt': FieldValue.serverTimestamp(),
+    }, SetOptions(merge: true));
+  }
+
+  Future<void> reportConversationAbuse({
+    required String conversationId,
+    required String reason,
+    String details = '',
+    String? messageId,
+  }) async {
+    final uid = currentUserId;
+    if (uid == null) throw StateError('Utilisateur non connecte');
+
+    final trimmedReason = reason.trim();
+    if (trimmedReason.isEmpty) {
+      throw StateError('Le motif du signalement est requis');
+    }
+
+    final threadSnapshot = await _threadsCollection.doc(conversationId).get();
+    final threadData = threadSnapshot.data() ?? const <String, dynamic>{};
+    final participants = _stringList(threadData['participants']);
+    final reportedUserId = participants.firstWhere(
+      (participantId) => participantId != uid,
+      orElse: () => '',
+    );
+
+    await _firestore.collection('conversation_reports').add({
+      'conversationId': conversationId,
+      'messageId': messageId?.trim().isNotEmpty == true ? messageId!.trim() : null,
+      'reportedBy': uid,
+      'reportedUserId': reportedUserId,
+      'reason': trimmedReason,
+      'details': details.trim(),
+      'conversationType': _stringOrNull(threadData['type']) ?? 'intervenant',
+      'conversationTitle': _stringOrNull(threadData['title']) ?? '',
+      'participants': participants,
+      'createdAt': FieldValue.serverTimestamp(),
+      'status': 'pending',
+    });
   }
 
   Future<ProfileSummary?> loadProfileById(String userId) =>
@@ -533,10 +635,15 @@ class MessagesRepository {
       data['subtitle'],
     ]);
     final managerPhotoUrl = _normalizeConversationMediaUrl(
-      _firstNonEmptyString([data['managerPhotoUrl'], managerProfile?.photoUrl]),
+      _firstNonEmptyString([
+        data['managerPhotoUrl'],
+        data['photoUrl'],
+        managerProfile?.photoUrl,
+      ]),
     );
     final managerPhotoBase64 = _firstNonEmptyString([
       data['managerPhotoBase64'],
+      data['photoBase64'],
       managerProfile?.photoBase64,
     ]);
 
@@ -557,33 +664,75 @@ class MessagesRepository {
   }
 
   Future<ProfileSummary?> _loadProfile(String userId) async {
+    if (_profileCache.containsKey(userId)) {
+      return _profileCache[userId];
+    }
+
+    final pendingRequest = _profileRequestCache[userId];
+    if (pendingRequest != null) {
+      return pendingRequest;
+    }
+
+    final request = _loadProfileFromFirestore(userId);
+    _profileRequestCache[userId] = request;
+    try {
+      final profile = await request;
+      _profileCache[userId] = profile;
+      return profile;
+    } finally {
+      _profileRequestCache.remove(userId);
+    }
+  }
+
+  Future<List<ProfileSummary>> _loadProfiles(List<String> ids) async {
+    final profiles = await Future.wait(ids.map(_loadProfile));
+    return profiles.whereType<ProfileSummary>().toList(growable: false);
+  }
+
+  Future<ProfileSummary?> _loadProfileFromFirestore(String userId) async {
     final snapshot = await _firestore.collection('profiles').doc(userId).get();
     if (!snapshot.exists || snapshot.data() == null) return null;
 
     final data = snapshot.data()!;
+    final userMeta =
+        (await _firestore.collection('users').doc(userId).get()).data() ??
+        const <String, dynamic>{};
+    final authUser = FirebaseAuth.instance.currentUser;
+    final authName = authUser != null && authUser.uid == userId
+        ? authUser.displayName?.trim()
+        : null;
+    final authPhotoUrl = authUser != null && authUser.uid == userId
+        ? authUser.photoURL
+        : null;
     return ProfileSummary(
       userId: userId,
-      name: _firstNonEmptyString([data['username'], data['name']]).isEmpty
+      name:
+          _firstNonEmptyString([
+            data['username'],
+            data['name'],
+            authName,
+          ]).isEmpty
           ? 'Intervenant'
-          : _firstNonEmptyString([data['username'], data['name']]),
+          : _firstNonEmptyString([data['username'], data['name'], authName]),
       department: _stringOrNull(data['department']),
       specialties: _stringList(data['specialties']),
       blockedUserIds: _stringList(data['blockedUserIds']),
       isAvailable: data['isAvailable'] == true,
       photoBase64: _stringOrNull(data['photoBase64']),
-      photoUrl: VpsMediaService.resolveProfileImageUrl(data),
+      photoUrl: VpsMediaService.resolveProfileImageUrl(data) ?? authPhotoUrl,
       phone: _stringOrNull(data['phone']),
       email: _stringOrNull(data['email']),
+      accountType: _stringOrNull(
+        userMeta['accountType'] ?? data['accountType'],
+      ),
+      stayfixBadgeLabel: _stringOrNull(data['stayfixBadgeLabel']),
+      apartmentName: _stringOrNull(data['apartmentName']),
     );
   }
 
-  Future<List<ProfileSummary>> _loadProfiles(List<String> ids) async {
-    final profiles = <ProfileSummary>[];
-    for (final id in ids) {
-      final profile = await _loadProfile(id);
-      if (profile != null) profiles.add(profile);
-    }
-    return profiles;
+  void _clearProfileCache(String userId) {
+    _profileCache.remove(userId);
+    _profileRequestCache.remove(userId);
   }
 
   Future<MessageSummary?> _loadLatestMessageFallback(
@@ -733,6 +882,20 @@ class MessagesRepository {
     return 'Aucun message pour le moment';
   }
 
+  static bool _shouldLoadLatestMessageFallback(Map<String, dynamic> data) {
+    final storedPreview = _firstNonEmptyString([
+      data['lastMessage'],
+      data['systemBannerText'],
+      data['preview'],
+    ]);
+    if (storedPreview.isEmpty) return true;
+
+    final storedTimestamp = _timestampToDateTime(
+      data['lastMessageAt'] ?? data['updatedAt'] ?? data['createdAt'],
+    );
+    return storedTimestamp == null;
+  }
+
   static int _unreadCountForUser(dynamic unreadBy, String userId) {
     if (unreadBy is Map) {
       final value = unreadBy[userId];
@@ -860,6 +1023,9 @@ class ProfileSummary {
     this.photoUrl,
     this.phone,
     this.email,
+    this.accountType,
+    this.stayfixBadgeLabel,
+    this.apartmentName,
   });
 
   final String userId;
@@ -872,6 +1038,9 @@ class ProfileSummary {
   final String? photoUrl;
   final String? phone;
   final String? email;
+  final String? accountType;
+  final String? stayfixBadgeLabel;
+  final String? apartmentName;
 
   String get initials {
     final parts = name
@@ -890,6 +1059,16 @@ class ProfileSummary {
     return department?.trim().isNotEmpty == true
         ? department!.trim()
         : 'Role non renseigne';
+  }
+
+  bool get isStayFixConcierge =>
+      accountType == 'concierge' || accountType == 'stayfix_job';
+
+  String get badgeLabel {
+    if (stayfixBadgeLabel?.trim().isNotEmpty == true) {
+      return stayfixBadgeLabel!.trim();
+    }
+    return roleLabel;
   }
 
   ImageProvider<Object>? get avatarImage {

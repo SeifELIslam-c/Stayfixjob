@@ -1,6 +1,5 @@
 // ignore_for_file: use_build_context_synchronously, curly_braces_in_flow_control_structures
 
-import 'dart:convert';
 import 'dart:io';
 import 'dart:math';
 
@@ -15,6 +14,7 @@ import 'package:intl_phone_field/country_picker_dialog.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
+import '../services/vps_media_service.dart';
 import 'home_screen.dart';
 import 'role_selection_screen.dart';
 import 'terms_screen.dart';
@@ -35,11 +35,6 @@ class _AuthScreenState extends State<AuthScreen> {
 <path fill="#1976D2" d="M43.611,20.083H42V20H24v8h11.303c-0.792,2.237-2.231,4.166-4.087,5.571c0.001-0.001,0.002-0.001,0.003-0.002l6.19,5.238C36.971,39.205,44,34,44,24C44,22.659,43.862,21.35,43.611,20.083z"/>
 </svg>
 ''';
-
-  static const _passwordResetApiUrl = String.fromEnvironment(
-    'PASSWORD_RESET_API_URL',
-    defaultValue: 'http://api.velixaneo.com:3011/api/password-reset',
-  );
 
   bool _isRegisterMode = false;
   bool _isLoading = false;
@@ -88,11 +83,165 @@ class _AuthScreenState extends State<AuthScreen> {
     return fallback;
   }
 
+  String _resolvedProfileName(
+    User user, {
+    String? preferredName,
+    String fallback = 'Employe',
+  }) {
+    final candidates = <String?>[
+      preferredName,
+      user.displayName,
+      _nameController.text.trim(),
+      _defaultProfileName(fallback: fallback),
+    ];
+    for (final candidate in candidates) {
+      final value = candidate?.trim() ?? '';
+      if (value.isNotEmpty && value.toLowerCase() != 'utilisateur') {
+        return value;
+      }
+    }
+    return fallback;
+  }
+
+  String _resolvedProfilePhotoUrl(User user, {String? preferredPhotoUrl}) {
+    final candidates = <String?>[preferredPhotoUrl, user.photoURL];
+    for (final candidate in candidates) {
+      final value = candidate?.trim() ?? '';
+      if (value.isNotEmpty) return value;
+    }
+    return '';
+  }
+
+  bool _isGenericUserName(String value) {
+    final normalized = value.trim().toLowerCase();
+    return normalized.isEmpty ||
+        normalized == 'utilisateur' ||
+        normalized == 'employe' ||
+        normalized == 'employé' ||
+        normalized == 'employe (nouveau)' ||
+        normalized == 'employé (nouveau)';
+  }
+
+  Future<({Map<String, dynamic> data, bool created})> _syncProfileFromAuth(
+    User user, {
+    String? profileName,
+    String? profileEmail,
+    String? profilePhone,
+    String? profilePhotoUrl,
+    bool preferIncomingName = false,
+  }) async {
+    final profileRef = FirebaseFirestore.instance
+        .collection('profiles')
+        .doc(user.uid);
+    final snapshot = await profileRef.get();
+    final existingData = snapshot.data() ?? <String, dynamic>{};
+
+    final incomingName = _resolvedProfileName(user, preferredName: profileName);
+    final existingName = (existingData['username'] as String?)?.trim() ?? '';
+    final finalName = (preferIncomingName || _isGenericUserName(existingName))
+        ? incomingName
+        : (existingName.isNotEmpty ? existingName : incomingName);
+
+    final incomingEmail = (profileEmail ?? user.email ?? '').trim();
+    final existingEmail = (existingData['email'] as String?)?.trim() ?? '';
+    final incomingPhone = (profilePhone ?? _phoneComplete).trim();
+    final existingPhone = (existingData['phone'] as String?)?.trim() ?? '';
+    final incomingPhotoUrl = _resolvedProfilePhotoUrl(
+      user,
+      preferredPhotoUrl: profilePhotoUrl,
+    );
+    final existingPhotoUrl = VpsMediaService.resolveProfileImageUrl(
+      existingData,
+    );
+
+    final updates = <String, dynamic>{
+      'id': user.uid,
+      'username': finalName,
+      'name': finalName,
+      'workerName': finalName,
+      'email': incomingEmail.isNotEmpty ? incomingEmail : existingEmail,
+      'phone': incomingPhone.isNotEmpty ? incomingPhone : existingPhone,
+      'phoneNational': _phoneController.text.trim(),
+      'phoneCountryIso': _phoneCountryIso,
+      'phoneDialCode': _phoneDialCode,
+      'updatedAt': FieldValue.serverTimestamp(),
+    };
+
+    if (!snapshot.exists) {
+      updates.addAll({
+        'department': '',
+        'maintenanceType': '',
+        'specialties': [],
+        'createdAt': FieldValue.serverTimestamp(),
+      });
+    }
+
+    final finalPhotoUrl = incomingPhotoUrl.isNotEmpty
+        ? incomingPhotoUrl
+        : (existingPhotoUrl ?? '');
+    if (finalPhotoUrl.isNotEmpty) {
+      updates['photoURL'] = finalPhotoUrl;
+      updates['photoUrl'] = finalPhotoUrl;
+    }
+
+    await profileRef.set(updates, SetOptions(merge: true));
+    return (
+      data: <String, dynamic>{...existingData, ...updates},
+      created: !snapshot.exists,
+    );
+  }
+
+  Future<bool> _isStayFixConcierge(String userId) async {
+    final userDoc = await FirebaseFirestore.instance
+        .collection('users')
+        .doc(userId)
+        .get();
+    final userData = userDoc.data() ?? <String, dynamic>{};
+    return userData['accountType'] == 'concierge' &&
+        userData['appAccess'] == 'stayfix_job' &&
+        userData['status'] != 'deleted';
+  }
+
+  Future<void> _routeAuthenticatedUser(
+    Map<String, dynamic> profileData, {
+    required String userId,
+  }) async {
+    final isStayFixConcierge = await _isStayFixConcierge(userId);
+    final dept = profileData['department'] ?? '';
+    final termsAccepted = profileData['termsAccepted'] ?? false;
+
+    if (!mounted) return;
+    if (!termsAccepted) {
+      Navigator.pushReplacement(
+        context,
+        MaterialPageRoute(
+          builder: (_) => TermsScreen(
+            nextScreen: isStayFixConcierge
+                ? const HomeScreen(requireAuth: false)
+                : null,
+          ),
+        ),
+      );
+    } else if (!isStayFixConcierge && dept.isEmpty) {
+      Navigator.pushReplacement(
+        context,
+        MaterialPageRoute(builder: (_) => const RoleSelectionScreen()),
+      );
+    } else {
+      Navigator.pushReplacement(
+        context,
+        MaterialPageRoute(builder: (_) => const HomeScreen(requireAuth: false)),
+      );
+    }
+  }
+
   Future<void> _completeAuthenticatedUser(
     UserCredential userCredential, {
     String? profileName,
     String? profileEmail,
     String? profilePhone,
+    String? profilePhotoUrl,
+    bool preferIncomingName = false,
   }) async {
     final user = userCredential.user;
     if (user == null) {
@@ -106,26 +255,56 @@ class _AuthScreenState extends State<AuthScreen> {
     final prefs = await SharedPreferences.getInstance();
     await prefs.setString('userId', userId);
 
-    final db = FirebaseFirestore.instance;
-    final docSnapshot = await db.collection('profiles').doc(userId).get();
+    final result = await _syncProfileFromAuth(
+      user,
+      profileName: profileName,
+      profileEmail: profileEmail,
+      profilePhone: profilePhone,
+      profilePhotoUrl: profilePhotoUrl,
+      preferIncomingName: preferIncomingName,
+    );
 
-    if (!docSnapshot.exists) {
-      await db.collection('profiles').doc(userId).set({
-        'id': userId,
-        'username': (profileName ?? user.displayName ?? _defaultProfileName())
-            .trim(),
-        'email': (profileEmail ?? user.email ?? _emailController.text.trim())
-            .trim(),
-        'phone': (profilePhone ?? _phoneComplete).trim(),
-        'phoneNational': _phoneController.text.trim(),
-        'phoneCountryIso': _phoneCountryIso,
-        'phoneDialCode': _phoneDialCode,
-        'department': '',
-        'maintenanceType': '',
-        'specialties': [],
-        'createdAt': FieldValue.serverTimestamp(),
-      });
+    // Check for concierge account (created by StayFix manager app)
+    final userDoc = await FirebaseFirestore.instance
+        .collection('users')
+        .doc(userId)
+        .get();
+    final userData = userDoc.data() ?? <String, dynamic>{};
+    final accountType = userData['accountType'] as String?;
+    final appAccess = userData['appAccess'] as String?;
+    final userStatus = userData['status'] as String?;
 
+    if (accountType == 'concierge' && appAccess == 'stayfix_job') {
+      if (userStatus == 'deleted') {
+        if (!mounted) return;
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Ce compte a été désactivé.')),
+        );
+        return;
+      }
+      if (!mounted) return;
+      // Concierge must accept terms but never goes through RoleSelectionScreen
+      final termsAccepted = result.data['termsAccepted'] ?? false;
+      if (!termsAccepted) {
+        Navigator.pushReplacement(
+          context,
+          MaterialPageRoute(
+            builder: (_) =>
+                const TermsScreen(nextScreen: HomeScreen(requireAuth: false)),
+          ),
+        );
+      } else {
+        Navigator.pushReplacement(
+          context,
+          MaterialPageRoute(
+            builder: (_) => const HomeScreen(requireAuth: false),
+          ),
+        );
+      }
+      return;
+    }
+
+    if (result.created) {
       if (!mounted) return;
       Navigator.pushReplacement(
         context,
@@ -134,27 +313,7 @@ class _AuthScreenState extends State<AuthScreen> {
       return;
     }
 
-    final data = docSnapshot.data()!;
-    final dept = data['department'] ?? '';
-    final termsAccepted = data['termsAccepted'] ?? false;
-
-    if (!mounted) return;
-    if (!termsAccepted) {
-      Navigator.pushReplacement(
-        context,
-        MaterialPageRoute(builder: (_) => const TermsScreen()),
-      );
-    } else if (dept.isEmpty) {
-      Navigator.pushReplacement(
-        context,
-        MaterialPageRoute(builder: (_) => const RoleSelectionScreen()),
-      );
-    } else {
-      Navigator.pushReplacement(
-        context,
-        MaterialPageRoute(builder: (_) => const HomeScreen(requireAuth: false)),
-      );
-    }
+    await _routeAuthenticatedUser(result.data, userId: userId);
   }
 
   Future<void> _ensureGoogleAccountHasPassword(User user) async {
@@ -257,6 +416,37 @@ class _AuthScreenState extends State<AuthScreen> {
       final prefs = await SharedPreferences.getInstance();
       await prefs.setString('userId', userId);
 
+      if (_isRegisterMode) {
+        await userCredential.user?.updateDisplayName(
+          _nameController.text.trim(),
+        );
+      }
+
+      final syncedProfile = await _syncProfileFromAuth(
+        userCredential.user!,
+        profileName: _isRegisterMode ? _nameController.text.trim() : null,
+        profileEmail: _emailController.text.trim(),
+        profilePhone: _phoneComplete.isNotEmpty
+            ? _phoneComplete
+            : _phoneController.text.trim(),
+        preferIncomingName: _isRegisterMode,
+      );
+
+      if (mounted) {
+        setState(() => _isLoading = false);
+        if (syncedProfile.created) {
+          Navigator.pushReplacement(
+            context,
+            MaterialPageRoute(builder: (_) => const TermsScreen()),
+          );
+          return;
+        }
+
+        await _routeAuthenticatedUser(syncedProfile.data, userId: userId);
+      }
+      return;
+
+      // ignore: dead_code
       final docSnapshot = await db.collection('profiles').doc(userId).get();
 
       if (!docSnapshot.exists) {
@@ -363,6 +553,8 @@ class _AuthScreenState extends State<AuthScreen> {
         profileName: userCredential.user?.displayName ?? _defaultProfileName(),
         profileEmail:
             userCredential.user?.email ?? _emailController.text.trim(),
+        profilePhotoUrl: userCredential.user?.photoURL,
+        preferIncomingName: true,
       );
       final userId = userCredential.user!.uid;
       var skipLegacyGoogleBootstrap = DateTime.now().microsecond < 0;
@@ -459,6 +651,8 @@ class _AuthScreenState extends State<AuthScreen> {
             _defaultProfileName(fallback: 'Employe Apple'),
         profileEmail:
             userCredential.user?.email ?? _emailController.text.trim(),
+        profilePhotoUrl: userCredential.user?.photoURL,
+        preferIncomingName: true,
       );
     } on FirebaseAuthException catch (e) {
       if (mounted) {
@@ -521,24 +715,8 @@ class _AuthScreenState extends State<AuthScreen> {
               });
 
               try {
-                final client = HttpClient();
-                client.connectionTimeout = const Duration(seconds: 12);
-                try {
-                  final request = await client
-                      .postUrl(Uri.parse(_passwordResetApiUrl))
-                      .timeout(const Duration(seconds: 12));
-                  request.headers.contentType = ContentType.json;
-                  request.add(
-                    utf8.encode(jsonEncode(<String, String>{'email': email})),
-                  );
-
-                  final response = await request.close().timeout(
-                    const Duration(seconds: 18),
-                  );
-                  final responseBody = await response
-                      .transform(utf8.decoder)
-                      .join()
-                      .timeout(const Duration(seconds: 18));
+                await FirebaseAuth.instance.sendPasswordResetEmail(email: email);
+                /*
 
                   if (response.statusCode < 200 || response.statusCode >= 300) {
                     String message = 'Impossible d’envoyer l’e-mail.';
@@ -556,6 +734,7 @@ class _AuthScreenState extends State<AuthScreen> {
                   client.close();
                 }
 
+                */
                 if (!mounted) return;
                 Navigator.of(dialogContext).pop();
                 ScaffoldMessenger.of(this.context).showSnackBar(

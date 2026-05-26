@@ -5,7 +5,10 @@ import 'package:flutter/material.dart';
 import 'package:intl_phone_field/country_picker_dialog.dart';
 import 'package:intl_phone_field/intl_phone_field.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
+import 'auth_screen.dart';
+import 'privacy_policy_screen.dart';
 import '../utils/profile_formatters.dart';
 import '../widgets/address_picker.dart';
 import '../widgets/premium_bottom_sheets.dart';
@@ -47,6 +50,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
   bool _eligibilityDirty = false;
   bool _speaksFrench = false;
   bool _speaksEnglish = false;
+  bool _speaksArabic = false;
+  bool _speaksSpanish = false;
   bool? _privacyAccepted;
   bool? _referredByEmployee;
   bool? _authorizedToWorkCanada;
@@ -61,6 +66,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
   Map<String, dynamic> _existingCvQuestionnaire = {};
   double? _addressLatitude;
   double? _addressLongitude;
+  bool _isDeletingAccount = false;
 
   @override
   void initState() {
@@ -89,10 +95,17 @@ class _SettingsScreenState extends State<SettingsScreen> {
         );
         final questionnaire =
             (data['cvQuestionnaire'] as Map<String, dynamic>?) ?? {};
+        final storedLanguages = ((data['languages'] as List?) ?? const <dynamic>[])
+            .map((item) => item.toString().trim().toLowerCase())
+            .toSet();
 
         setState(() {
           _existingCvQuestionnaire = questionnaire;
-          _nameCtrl.text = data['username'] ?? '';
+          _nameCtrl.text = ((data['username'] as String?)?.trim().isNotEmpty ==
+                      true
+                  ? data['username']
+                  : user.displayName) ??
+              '';
           _addressCtrl.text = data['address'] ?? '';
           _addressLatitude = (data['addressLatitude'] as num?)?.toDouble();
           _addressLongitude = (data['addressLongitude'] as num?)?.toDouble();
@@ -117,6 +130,10 @@ class _SettingsScreenState extends State<SettingsScreen> {
               questionnaire['referralEmployeeId'] ?? '';
           _speaksFrench = data['speaksFrench'] as bool? ?? false;
           _speaksEnglish = data['speaksEnglish'] as bool? ?? false;
+          _speaksArabic =
+              data['speaksArabic'] as bool? ?? storedLanguages.contains('arabic');
+          _speaksSpanish =
+              data['speaksSpanish'] as bool? ?? storedLanguages.contains('spanish');
         });
       }
       if (mounted) {
@@ -181,13 +198,19 @@ class _SettingsScreenState extends State<SettingsScreen> {
     if (mounted) setState(() => _isLoading = true);
     try {
       final user = FirebaseAuth.instance.currentUser!;
+      final trimmedName = _nameCtrl.text.trim();
       await FirebaseFirestore.instance
           .collection('profiles')
           .doc(user.uid)
           .update({
-        'username': _nameCtrl.text.trim(),
+        'username': trimmedName,
+        'name': trimmedName,
+        'workerName': trimmedName,
         'dob': _dobCtrl.text.trim(),
       });
+      if (trimmedName.isNotEmpty && trimmedName != (user.displayName ?? '')) {
+        await user.updateDisplayName(trimmedName);
+      }
       if (_emailCtrl.text.trim() != user.email) {
         await user.verifyBeforeUpdateEmail(_emailCtrl.text.trim());
       }
@@ -220,12 +243,21 @@ class _SettingsScreenState extends State<SettingsScreen> {
     if (mounted) setState(() => _isLoading = true);
     try {
       final user = FirebaseAuth.instance.currentUser!;
+      final languages = <String>[
+        if (_speaksFrench) 'french',
+        if (_speaksEnglish) 'english',
+        if (_speaksArabic) 'arabic',
+        if (_speaksSpanish) 'spanish',
+      ];
       await FirebaseFirestore.instance
           .collection('profiles')
           .doc(user.uid)
           .update({
         'speaksFrench': _speaksFrench,
         'speaksEnglish': _speaksEnglish,
+        'speaksArabic': _speaksArabic,
+        'speaksSpanish': _speaksSpanish,
+        'languages': languages,
       });
       if (!mounted) return;
       setState(() => _languagesDirty = false);
@@ -375,6 +407,210 @@ class _SettingsScreenState extends State<SettingsScreen> {
       );
     } finally {
       if (mounted) setState(() => _isLoading = false);
+    }
+  }
+
+  Future<String?> _promptCurrentPassword() async {
+    final controller = TextEditingController();
+    String? errorText;
+
+    final password = await showDialog<String>(
+      context: context,
+      barrierDismissible: false,
+      builder: (dialogContext) {
+        return StatefulBuilder(
+          builder: (context, setDialogState) {
+            return AlertDialog(
+              title: const Text('Confirmer votre mot de passe'),
+              content: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  const Text(
+                    'Pour supprimer definitivement votre compte, saisissez votre mot de passe actuel.',
+                  ),
+                  const SizedBox(height: 12),
+                  TextField(
+                    controller: controller,
+                    obscureText: true,
+                    autofocus: true,
+                    decoration: InputDecoration(
+                      labelText: 'Mot de passe actuel',
+                      errorText: errorText,
+                    ),
+                    onSubmitted: (_) {
+                      final value = controller.text.trim();
+                      if (value.isEmpty) {
+                        setDialogState(() {
+                          errorText = 'Le mot de passe est requis.';
+                        });
+                        return;
+                      }
+                      Navigator.of(dialogContext).pop(value);
+                    },
+                  ),
+                ],
+              ),
+              actions: [
+                TextButton(
+                  onPressed: () => Navigator.of(dialogContext).pop(),
+                  child: const Text('Annuler'),
+                ),
+                FilledButton(
+                  onPressed: () {
+                    final value = controller.text.trim();
+                    if (value.isEmpty) {
+                      setDialogState(() {
+                        errorText = 'Le mot de passe est requis.';
+                      });
+                      return;
+                    }
+                    Navigator.of(dialogContext).pop(value);
+                  },
+                  child: const Text('Continuer'),
+                ),
+              ],
+            );
+          },
+        );
+      },
+    );
+
+    controller.dispose();
+    return password;
+  }
+
+  Future<void> _reauthenticateForDeletion(User user) async {
+    final providerIds = user.providerData
+        .map((provider) => provider.providerId)
+        .toSet();
+
+    if (providerIds.contains(EmailAuthProvider.PROVIDER_ID)) {
+      final password = await _promptCurrentPassword();
+      if (password == null) {
+        throw FirebaseAuthException(
+          code: 'user-cancelled',
+          message: 'Suppression annulee.',
+        );
+      }
+      final email = user.email?.trim() ?? _emailCtrl.text.trim();
+      if (email.isEmpty) {
+        throw FirebaseAuthException(
+          code: 'missing-email',
+          message: 'Adresse e-mail introuvable pour la reauthentification.',
+        );
+      }
+      await user.reauthenticateWithCredential(
+        EmailAuthProvider.credential(email: email, password: password),
+      );
+      return;
+    }
+
+    if (providerIds.contains('google.com')) {
+      await user.reauthenticateWithProvider(GoogleAuthProvider());
+      return;
+    }
+
+    if (providerIds.contains('apple.com')) {
+      final provider = AppleAuthProvider()
+        ..addScope('email')
+        ..addScope('name');
+      await user.reauthenticateWithProvider(provider);
+    }
+  }
+
+  Future<void> _deleteAccount() async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) {
+        return AlertDialog(
+          title: const Text('Supprimer mon compte'),
+          content: const Text(
+            'Cette action supprimera votre acces a l application et vos informations de profil. Cette action est definitive.',
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(dialogContext).pop(false),
+              child: const Text('Annuler'),
+            ),
+            FilledButton(
+              style: FilledButton.styleFrom(backgroundColor: kSettingsRed),
+              onPressed: () => Navigator.of(dialogContext).pop(true),
+              child: const Text('Supprimer'),
+            ),
+          ],
+        );
+      },
+    );
+
+    if (confirmed != true) return;
+
+    final user = FirebaseAuth.instance.currentUser;
+    if (user == null) return;
+
+    if (mounted) {
+      setState(() {
+        _isLoading = true;
+        _isDeletingAccount = true;
+      });
+    }
+
+    try {
+      final uid = user.uid;
+      await _reauthenticateForDeletion(user);
+
+      final batch = FirebaseFirestore.instance.batch();
+      batch.delete(FirebaseFirestore.instance.collection('profiles').doc(uid));
+      batch.set(
+        FirebaseFirestore.instance.collection('users').doc(uid),
+        {
+          'status': 'deleted',
+          'deletedAt': FieldValue.serverTimestamp(),
+          'deletedBy': 'self-service',
+        },
+        SetOptions(merge: true),
+      );
+      await batch.commit();
+      await user.delete();
+
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.remove('isLoggedIn');
+      await prefs.remove('userId');
+      await FirebaseAuth.instance.signOut();
+
+      if (!mounted) return;
+      Navigator.of(context).pushAndRemoveUntil(
+        MaterialPageRoute(builder: (_) => const AuthScreen()),
+        (route) => false,
+      );
+    } on FirebaseAuthException catch (e) {
+      if (!mounted) return;
+      final message = switch (e.code) {
+        'wrong-password' =>
+          'Le mot de passe saisi est incorrect. Le compte n a pas ete supprime.',
+        'requires-recent-login' =>
+          'Reconnectez-vous puis recommencez pour confirmer la suppression du compte.',
+        'user-cancelled' => 'Suppression du compte annulee.',
+        _ => e.message ?? 'Impossible de supprimer le compte pour le moment.',
+      };
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text(message), backgroundColor: Colors.red),
+      );
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('Impossible de supprimer le compte: $e'),
+          backgroundColor: Colors.red,
+        ),
+      );
+    } finally {
+      if (mounted) {
+        setState(() {
+          _isLoading = false;
+          _isDeletingAccount = false;
+        });
+      }
     }
   }
 
@@ -1158,7 +1394,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
           ),
           CupertinoSwitch(
             value: value,
-            activeTrackColor: kSettingsBlue,
+            activeTrackColor: Colors.green,
             onChanged: onChanged,
           ),
         ],
@@ -1185,6 +1421,26 @@ class _SettingsScreenState extends State<SettingsScreen> {
           value: _speaksEnglish,
           onChanged: (v) => setState(() {
             _speaksEnglish = v;
+            _languagesDirty = true;
+          }),
+        ),
+        const SizedBox(height: 12),
+        _languageTile(
+          flag: '🇩🇿',
+          label: 'Arabe',
+          value: _speaksArabic,
+          onChanged: (v) => setState(() {
+            _speaksArabic = v;
+            _languagesDirty = true;
+          }),
+        ),
+        const SizedBox(height: 12),
+        _languageTile(
+          flag: '🇪🇸',
+          label: 'Espagnol',
+          value: _speaksSpanish,
+          onChanged: (v) => setState(() {
+            _speaksSpanish = v;
             _languagesDirty = true;
           }),
         ),
@@ -1323,6 +1579,27 @@ class _SettingsScreenState extends State<SettingsScreen> {
           ),
         ),
         const SizedBox(height: 16),
+        SizedBox(
+          width: double.infinity,
+          child: OutlinedButton.icon(
+            onPressed: () {
+              Navigator.of(context).push(
+                MaterialPageRoute(builder: (_) => const PrivacyPolicyScreen()),
+              );
+            },
+            icon: const Icon(LucideIcons.fileLock2, size: 18),
+            label: const Text('Lire la politique de confidentialite'),
+            style: OutlinedButton.styleFrom(
+              foregroundColor: kSettingsBlue,
+              side: const BorderSide(color: Color(0xFFBDD5FF)),
+              padding: const EdgeInsets.symmetric(vertical: 14),
+              shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(16),
+              ),
+            ),
+          ),
+        ),
+        const SizedBox(height: 12),
         const Align(
           alignment: Alignment.centerLeft,
           child: Text(
@@ -1426,48 +1703,6 @@ class _SettingsScreenState extends State<SettingsScreen> {
       child: Column(
         children: [
           _questionRow(
-            question: 'Avez-vous ete refere par un employe existant ?',
-            value: _referredByEmployee,
-            onChanged: (value) => setState(() {
-              _referredByEmployee = value;
-              _eligibilityDirty = true;
-            }),
-          ),
-          if (_referredByEmployee == true) ...[
-            const SizedBox(height: 6),
-            TextField(
-              controller: _referralEmployeeIdCtrl,
-              style: const TextStyle(color: kSettingsText),
-              onChanged: (_) => setState(() => _eligibilityDirty = true),
-              decoration: InputDecoration(
-                hintText: "Numero d'employe du referent",
-                hintStyle: const TextStyle(color: kSettingsMuted),
-                filled: true,
-                fillColor: const Color(0xFFF8FAFF),
-                contentPadding: const EdgeInsets.symmetric(
-                  horizontal: 16,
-                  vertical: 14,
-                ),
-                border: OutlineInputBorder(
-                  borderRadius: BorderRadius.circular(16),
-                  borderSide: const BorderSide(color: kSettingsBorder),
-                ),
-                enabledBorder: OutlineInputBorder(
-                  borderRadius: BorderRadius.circular(16),
-                  borderSide: const BorderSide(color: kSettingsBorder),
-                ),
-                focusedBorder: OutlineInputBorder(
-                  borderRadius: BorderRadius.circular(16),
-                  borderSide: const BorderSide(
-                    color: kSettingsBlue,
-                    width: 1.4,
-                  ),
-                ),
-              ),
-            ),
-          ],
-          const Divider(color: kSettingsBorder, height: 22),
-          _questionRow(
             question: 'Etes-vous legalement autorise a travailler au Canada ?',
             value: _authorizedToWorkCanada,
             onChanged: (value) => setState(() {
@@ -1499,6 +1734,76 @@ class _SettingsScreenState extends State<SettingsScreen> {
     );
   }
 
+  Widget _buildDangerSection() {
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(24),
+        border: Border.all(color: const Color(0xFFFECACA)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Row(
+            children: [
+              Icon(LucideIcons.triangleAlert, color: kSettingsRed, size: 20),
+              SizedBox(width: 10),
+              Text(
+                'Zone sensible',
+                style: TextStyle(
+                  color: kSettingsText,
+                  fontSize: 17,
+                  fontWeight: FontWeight.w800,
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 10),
+          const Text(
+            'Supprimez votre compte directement depuis l application si vous ne souhaitez plus utiliser StayFix Job.',
+            style: TextStyle(
+              color: kSettingsBody,
+              fontSize: 13.5,
+              height: 1.45,
+              fontWeight: FontWeight.w500,
+            ),
+          ),
+          const SizedBox(height: 14),
+          SizedBox(
+            width: double.infinity,
+            child: OutlinedButton.icon(
+              onPressed: (_isLoading || _isDeletingAccount)
+                  ? null
+                  : _deleteAccount,
+              icon: _isDeletingAccount
+                  ? const SizedBox(
+                      width: 16,
+                      height: 16,
+                      child: CircularProgressIndicator(strokeWidth: 2),
+                    )
+                  : const Icon(LucideIcons.trash2, size: 18),
+              label: Text(
+                _isDeletingAccount
+                    ? 'Suppression en cours...'
+                    : 'Supprimer mon compte',
+              ),
+              style: OutlinedButton.styleFrom(
+                foregroundColor: kSettingsRed,
+                side: const BorderSide(color: Color(0xFFFCA5A5)),
+                padding: const EdgeInsets.symmetric(vertical: 14),
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(16),
+                ),
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
   Widget _buildContent() {
     return Container(
       decoration: const BoxDecoration(
@@ -1520,7 +1825,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
             _sectionShell(
               id: 'languages',
               icon: LucideIcons.globe,
-              title: 'Preference linguistique',
+              title: 'Langues que je parle',
               subtitle: 'Langues parlees et comprises',
               child: _buildLanguagesSection(),
             ),
@@ -1547,6 +1852,14 @@ class _SettingsScreenState extends State<SettingsScreen> {
               title: 'Admissibilite',
               subtitle: "Repondez aux questions d'admissibilite",
               child: _buildEligibilitySection(),
+            ),
+            const SizedBox(height: 14),
+            _sectionShell(
+              id: 'danger',
+              icon: LucideIcons.shieldAlert,
+              title: 'Gestion du compte',
+              subtitle: 'Options sensibles et suppression du compte',
+              child: _buildDangerSection(),
             ),
           ],
         ),

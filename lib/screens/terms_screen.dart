@@ -5,6 +5,7 @@ import 'package:lucide_icons_flutter/lucide_icons.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import 'auth_screen.dart';
+import 'home_screen.dart';
 import 'role_selection_screen.dart';
 
 const String _tcFrench = '''STAYFIX JOB — CONDITIONS D'UTILISATION
@@ -145,8 +146,10 @@ These Terms shall be governed by applicable laws of the jurisdiction in which th
 
 class TermsScreen extends StatefulWidget {
   final bool isFirstTime;
+  // When provided, navigate here after accepting instead of RoleSelectionScreen
+  final Widget? nextScreen;
 
-  const TermsScreen({super.key, this.isFirstTime = true});
+  const TermsScreen({super.key, this.isFirstTime = true, this.nextScreen});
 
   @override
   State<TermsScreen> createState() => _TermsScreenState();
@@ -195,7 +198,49 @@ class _TermsScreenState extends State<TermsScreen> {
       setState(() {
         _acceptedBefore = data['termsAccepted'] == true;
       });
+      if (_acceptedBefore) {
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          _routeAfterAcceptance();
+        });
+      }
     } catch (_) {}
+  }
+
+  Future<void> _routeAfterAcceptance() async {
+    if (!mounted) return;
+    if (widget.nextScreen != null) {
+      Navigator.pushReplacement(
+        context,
+        MaterialPageRoute(builder: (_) => widget.nextScreen!),
+      );
+      return;
+    }
+    if (!widget.isFirstTime) {
+      Navigator.pop(context);
+      return;
+    }
+
+    final user = FirebaseAuth.instance.currentUser;
+    final userData = user == null
+        ? null
+        : (await FirebaseFirestore.instance
+                  .collection('users')
+                  .doc(user.uid)
+                  .get())
+              .data();
+    if (!mounted) return;
+    final isStayFixConcierge =
+        userData?['accountType'] == 'concierge' &&
+        userData?['appAccess'] == 'stayfix_job' &&
+        userData?['status'] != 'deleted';
+    Navigator.pushReplacement(
+      context,
+      MaterialPageRoute(
+        builder: (_) => isStayFixConcierge
+            ? const HomeScreen(requireAuth: false)
+            : const RoleSelectionScreen(),
+      ),
+    );
   }
 
   void _onScroll() {
@@ -255,14 +300,7 @@ class _TermsScreenState extends State<TermsScreen> {
         ),
       );
 
-      if (widget.isFirstTime) {
-        Navigator.pushReplacement(
-          context,
-          MaterialPageRoute(builder: (_) => const RoleSelectionScreen()),
-        );
-      } else {
-        Navigator.pop(context);
-      }
+      await _routeAfterAcceptance();
     } catch (e) {
       if (!mounted) return;
       setState(() => _isLoading = false);

@@ -25,6 +25,7 @@ import '../models/manager_offer.dart';
 import '../services/offers_service.dart';
 import '../services/story_service.dart';
 import '../services/vps_media_service.dart';
+import '../widgets/unread_messages_nav_item.dart';
 import 'add_worker_story_screen.dart';
 
 const kHomeBlue = Color(0xFF0F63FF);
@@ -58,7 +59,8 @@ class _HomeScreenState extends State<HomeScreen> {
   String? _userPhotoBase64;
   String? _userPhotoUrl;
   bool _isAvailable = false;
-  // ── Offers carousel ───────────────────────────────────────────────────────
+  bool _isConcierge = false;
+  //   Offers carousel                            ─
   final OffersService _offersService = OffersService();
   List<ManagerOffer> _homeOffers = [];
   int _homeOfferPage = 0;
@@ -81,6 +83,9 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 
   String _displayDepartment() {
+    if (_isConcierge) {
+      return 'Concierge';
+    }
     if (_department.trim().isEmpty || _department == 'Non dÃ©fini') {
       return _undefinedDisplay;
     }
@@ -147,11 +152,34 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 
   String _resolvedDepartmentLabel() {
+    if (_isConcierge) {
+      return 'Concierge';
+    }
     final department = _normalizeLegacyFrenchText(_department).trim();
     if (department.isEmpty || department == _undefinedDisplay) {
       return _undefinedDisplay;
     }
     return department;
+  }
+
+  // ignore: unused_element
+  String _buildStayFixBadgeLabel({
+    required String department,
+    required List<String> specialties,
+  }) {
+    if (_isConcierge) {
+      return 'Concierge';
+    }
+    final resolvedDepartment = _normalizeLegacyFrenchText(department).trim();
+    final primarySpecialty = specialties.isEmpty
+        ? ''
+        : _normalizeLegacyFrenchText(specialties.first).trim();
+    if (resolvedDepartment.isEmpty && primarySpecialty.isEmpty) {
+      return 'Concierge';
+    }
+    if (resolvedDepartment.isEmpty) return primarySpecialty;
+    if (primarySpecialty.isEmpty) return resolvedDepartment;
+    return '$resolvedDepartment · $primarySpecialty';
   }
 
   List<String> _uniqueSpecialties(Iterable<dynamic> values) {
@@ -166,6 +194,7 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 
   List<String> _displaySpecialties() {
+    if (_isConcierge) return const <String>[];
     final specialties = _specialties
         .map(_normalizeLegacyFrenchText)
         .where((specialty) => specialty.trim().isNotEmpty)
@@ -184,9 +213,13 @@ class _HomeScreenState extends State<HomeScreen> {
             .get();
         if (docSnapshot.exists) {
           final data = docSnapshot.data()!;
+          final profileName = (data['username'] as String?)?.trim() ?? '';
+          final authName = user.displayName?.trim() ?? '';
           if (mounted) {
             setState(() {
-              _username = data['username'] ?? 'Utilisateur';
+              _username = profileName.isNotEmpty
+                  ? profileName
+                  : (authName.isNotEmpty ? authName : 'Utilisateur');
               _department = _normalizeLegacyFrenchText(
                 data['department'] ?? _undefinedDisplay,
               );
@@ -194,14 +227,38 @@ class _HomeScreenState extends State<HomeScreen> {
                 data['specialties'] ?? [],
               ).map(_normalizeLegacyFrenchText).toList();
               _userPhotoBase64 = data['photoBase64'];
-              _userPhotoUrl = VpsMediaService.resolveProfileImageUrl(data);
+              _userPhotoUrl =
+                  VpsMediaService.resolveProfileImageUrl(data) ?? user.photoURL;
               _isAvailable = data['isAvailable'] == true;
             });
           }
+
+          // Check for scoped concierge account
+          if (data['isStayFixAssigned'] == true) {
+            final userDoc = await FirebaseFirestore.instance
+                .collection('users')
+                .doc(user.uid)
+                .get();
+            final accountType = userDoc.data()?['accountType'] as String?;
+            if (accountType == 'concierge' && mounted) {
+              final computedBadgeLabel = 'Concierge';
+              final badgeLabel =
+                  (data['stayfixBadgeLabel'] as String?)?.trim() ?? '';
+              final resolvedBadgeLabel = computedBadgeLabel;
+              if (resolvedBadgeLabel != badgeLabel) {
+                docSnapshot.reference.set({
+                  'stayfixBadgeLabel': resolvedBadgeLabel,
+                }, SetOptions(merge: true));
+              }
+              setState(() {
+                _isConcierge = true;
+              });
+            }
+          }
         }
       }
-      // Load carousel offers once department is known
-      if (_department.isNotEmpty) _loadHomeOffers();
+      // Load carousel offers once department is known (or for concierge)
+      if (_isConcierge || _department.isNotEmpty) _loadHomeOffers();
     } catch (e) {
       debugPrint('Erreur chargement Home: $e');
     }
@@ -209,7 +266,9 @@ class _HomeScreenState extends State<HomeScreen> {
 
   Future<void> _loadHomeOffers() async {
     try {
-      final offers = await _offersService.loadOffersForWorker(_department);
+      final offers = _isConcierge
+          ? await _offersService.loadManagerCreatedOffersForStayfixJob()
+          : await _offersService.loadOffersForWorker(_department);
       if (mounted) {
         setState(() => _homeOffers = offers.take(8).toList());
       }
@@ -304,7 +363,7 @@ class _HomeScreenState extends State<HomeScreen> {
     );
   }
 
-  // ── Offers carousel ───────────────────────────────────────────────────────
+  //   Offers carousel                            ─
 
   Widget _buildOffersCarousel() {
     if (_homeOffers.isEmpty) {
@@ -316,7 +375,11 @@ class _HomeScreenState extends State<HomeScreen> {
           borderRadius: BorderRadius.circular(24),
           border: Border.all(color: kHomeBorder),
           boxShadow: const [
-            BoxShadow(color: Color(0x0A0F63FF), blurRadius: 24, offset: Offset(0, 8)),
+            BoxShadow(
+              color: Color(0x0A0F63FF),
+              blurRadius: 24,
+              offset: Offset(0, 8),
+            ),
           ],
         ),
         child: Column(
@@ -330,19 +393,33 @@ class _HomeScreenState extends State<HomeScreen> {
                     color: const Color(0xFFF0F6FF),
                     borderRadius: BorderRadius.circular(12),
                   ),
-                  child: const Icon(LucideIcons.lightbulb, color: kHomeBlue, size: 18),
+                  child: const Icon(
+                    LucideIcons.lightbulb,
+                    color: kHomeBlue,
+                    size: 18,
+                  ),
                 ),
                 const SizedBox(width: 10),
                 const Text(
                   'Conseil',
-                  style: TextStyle(color: kHomeBlue, fontSize: 13, fontWeight: FontWeight.w700, letterSpacing: 0.3),
+                  style: TextStyle(
+                    color: kHomeBlue,
+                    fontSize: 13,
+                    fontWeight: FontWeight.w700,
+                    letterSpacing: 0.3,
+                  ),
                 ),
               ],
             ),
             const SizedBox(height: 14),
             const Text(
               "Plus votre compte est ancien, plus vos chances d'être contacté augmentent.",
-              style: TextStyle(color: Color(0xFF13203F), fontSize: 14, fontWeight: FontWeight.w600, height: 1.45),
+              style: TextStyle(
+                color: Color(0xFF13203F),
+                fontSize: 14,
+                fontWeight: FontWeight.w600,
+                height: 1.45,
+              ),
             ),
             const SizedBox(height: 16),
             Flexible(
@@ -351,15 +428,30 @@ class _HomeScreenState extends State<HomeScreen> {
                   mainAxisSize: MainAxisSize.min,
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    _buildSuggestionChip(LucideIcons.star, 'Complétez votre profil à 100%'),
+                    _buildSuggestionChip(
+                      LucideIcons.star,
+                      'Complétez votre profil à 100%',
+                    ),
                     const SizedBox(height: 8),
-                    _buildSuggestionChip(LucideIcons.clock3, 'Mettez à jour vos disponibilités'),
+                    _buildSuggestionChip(
+                      LucideIcons.clock3,
+                      'Mettez à jour vos disponibilités',
+                    ),
                     const SizedBox(height: 8),
-                    _buildSuggestionChip(LucideIcons.mapPin, 'Activez votre localisation'),
+                    _buildSuggestionChip(
+                      LucideIcons.mapPin,
+                      'Activez votre localisation',
+                    ),
                     const SizedBox(height: 8),
-                    _buildSuggestionChip(LucideIcons.camera, 'Ajoutez une photo de profil'),
+                    _buildSuggestionChip(
+                      LucideIcons.camera,
+                      'Ajoutez une photo de profil',
+                    ),
                     const SizedBox(height: 8),
-                    _buildSuggestionChip(LucideIcons.briefcase, 'Renseignez votre expérience'),
+                    _buildSuggestionChip(
+                      LucideIcons.briefcase,
+                      'Renseignez votre expérience',
+                    ),
                   ],
                 ),
               ),
@@ -583,7 +675,7 @@ class _HomeScreenState extends State<HomeScreen> {
     );
   }
 
-  // ── Story entry ───────────────────────────────────────────────────────────
+  //   Story entry                              ─
 
   void _openStoryEditor() {
     final uid = FirebaseAuth.instance.currentUser?.uid;
@@ -649,7 +741,7 @@ class _HomeScreenState extends State<HomeScreen> {
     );
   }
 
-  // ── Hero header ───────────────────────────────────────────────────────────
+  //   Hero header                              ─
 
   Widget _buildHeroHeader() {
     return SizedBox(
@@ -881,7 +973,11 @@ class _HomeScreenState extends State<HomeScreen> {
         Expanded(
           child: Text(
             text,
-            style: const TextStyle(color: Color(0xFF475569), fontSize: 13, fontWeight: FontWeight.w500),
+            style: const TextStyle(
+              color: Color(0xFF475569),
+              fontSize: 13,
+              fontWeight: FontWeight.w500,
+            ),
           ),
         ),
       ],
@@ -889,9 +985,13 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 
   Widget _buildSpecialtyCard() {
+    final sectionTitle = _isConcierge
+        ? 'VOTRE ROLE STAYFIX'
+        : 'VOTRE SPÉCIALITÉ';
     return _GlassCard(
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
+        mainAxisSize: MainAxisSize.min,
         children: [
           Row(
             children: [
@@ -921,9 +1021,9 @@ class _HomeScreenState extends State<HomeScreen> {
                       color: kHomeLightBlue,
                       borderRadius: BorderRadius.circular(14),
                     ),
-                    child: const Text(
-                      'VOTRE SPÉCIALITÉ',
-                      style: TextStyle(
+                    child: Text(
+                      sectionTitle,
+                      style: const TextStyle(
                         color: kHomeBlue,
                         fontSize: 11.5,
                         fontWeight: FontWeight.w800,
@@ -954,40 +1054,77 @@ class _HomeScreenState extends State<HomeScreen> {
               letterSpacing: -0.35,
             ),
           ),
-          const SizedBox(height: 8),
-          Expanded(
-            child: SingleChildScrollView(
-              physics: const BouncingScrollPhysics(),
-              child: Align(
-                alignment: Alignment.topLeft,
-                child: Wrap(
-                  spacing: 8,
-                  runSpacing: 8,
-                  children: _displaySpecialties().map((specialty) {
-                    return Container(
-                      padding: const EdgeInsets.symmetric(
-                        horizontal: 12,
-                        vertical: 5,
-                      ),
-                      decoration: BoxDecoration(
-                        color: kHomeLightBlue,
-                        borderRadius: BorderRadius.circular(16),
-                      ),
-                      child: Text(
-                        specialty,
-                        style: const TextStyle(
-                          color: kHomeBlue,
-                          fontSize: 12,
-                          height: 1.2,
-                          fontWeight: FontWeight.w700,
+          if (_isConcierge) ...[
+            const SizedBox(height: 10),
+            Container(
+              width: double.infinity,
+              padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+              decoration: BoxDecoration(
+                color: Colors.white,
+                borderRadius: BorderRadius.circular(16),
+                border: Border.all(color: const Color(0xFFD6E8FF)),
+              ),
+              child: const Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Text(
+                    'Compte StayFix',
+                    style: TextStyle(
+                      color: kHomeBlue,
+                      fontSize: 12.5,
+                      fontWeight: FontWeight.w800,
+                    ),
+                  ),
+                  SizedBox(height: 6),
+                  Text(
+                    'Ce compte est un concierge.',
+                    style: TextStyle(
+                      color: Color(0xFF475569),
+                      fontSize: 12.5,
+                      fontWeight: FontWeight.w600,
+                      height: 1.3,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ] else ...[
+            const SizedBox(height: 8),
+            Flexible(
+              child: SingleChildScrollView(
+                physics: const BouncingScrollPhysics(),
+                child: Align(
+                  alignment: Alignment.topLeft,
+                  child: Wrap(
+                    spacing: 8,
+                    runSpacing: 8,
+                    children: _displaySpecialties().map((specialty) {
+                      return Container(
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 12,
+                          vertical: 5,
                         ),
-                      ),
-                    );
-                  }).toList(),
+                        decoration: BoxDecoration(
+                          color: kHomeLightBlue,
+                          borderRadius: BorderRadius.circular(16),
+                        ),
+                        child: Text(
+                          specialty,
+                          style: const TextStyle(
+                            color: kHomeBlue,
+                            fontSize: 12,
+                            height: 1.2,
+                            fontWeight: FontWeight.w700,
+                          ),
+                        ),
+                      );
+                    }).toList(),
+                  ),
                 ),
               ),
             ),
-          ),
+          ],
         ],
       ),
     );
@@ -1173,7 +1310,6 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 
   Widget _buildBottomNavBar() {
-    final uid = FirebaseAuth.instance.currentUser?.uid ?? '';
     return Container(
       decoration: const BoxDecoration(
         color: Colors.white,
@@ -1209,8 +1345,11 @@ class _HomeScreenState extends State<HomeScreen> {
                 ),
               ),
               Expanded(
-                child: _HomeMessagesNavItem(
-                  uid: uid,
+                child: UnreadMessagesNavItem(
+                  active: false,
+                  activeColor: kHomeBlue,
+                  inactiveColor: kHomeMuted,
+                  indicatorColor: kHomeBlue,
                   onTap: _openMessages,
                 ),
               ),
@@ -1264,7 +1403,7 @@ class _HomeScreenState extends State<HomeScreen> {
                   ),
                   const SizedBox(height: 10),
                   SizedBox(
-                    height: 155,
+                    height: _isConcierge ? 178 : 155,
                     child: _buildSpecialtyCard()
                         .animate()
                         .fadeIn(delay: 200.ms, duration: 280.ms)
@@ -1652,17 +1791,18 @@ class _WorkerStoryViewerScreenState extends State<_WorkerStoryViewerScreen>
     });
 
     if (widget.story.isVideo) {
-      _videoCtrl = VideoPlayerController.networkUrl(
-        Uri.parse(widget.story.mediaUrl),
-      )..initialize().then((_) {
-          if (!mounted) return;
-          final dur = _videoCtrl!.value.duration;
-          _progress.duration =
-              dur.inMilliseconds > 0 ? dur : const Duration(seconds: 15);
-          setState(() => _videoReady = true);
-          _videoCtrl!.play();
-          _progress.forward();
-        });
+      _videoCtrl =
+          VideoPlayerController.networkUrl(Uri.parse(widget.story.mediaUrl))
+            ..initialize().then((_) {
+              if (!mounted) return;
+              final dur = _videoCtrl!.value.duration;
+              _progress.duration = dur.inMilliseconds > 0
+                  ? dur
+                  : const Duration(seconds: 15);
+              setState(() => _videoReady = true);
+              _videoCtrl!.play();
+              _progress.forward();
+            });
     } else {
       _progress.forward();
     }
@@ -1869,21 +2009,21 @@ class _WorkerStoryViewerScreenState extends State<_WorkerStoryViewerScreen>
         child: Stack(
           fit: StackFit.expand,
           children: [
-            // ── Media ────────────────────────────────────────────────────────
+            //   Media
             story.isVideo
                 ? _videoReady && _videoCtrl != null
-                    ? Center(
-                        child: AspectRatio(
-                          aspectRatio: _videoCtrl!.value.aspectRatio,
-                          child: VideoPlayer(_videoCtrl!),
-                        ),
-                      )
-                    : const Center(
-                        child: CircularProgressIndicator(
-                          color: Colors.white54,
-                          strokeWidth: 2,
-                        ),
-                      )
+                      ? Center(
+                          child: AspectRatio(
+                            aspectRatio: _videoCtrl!.value.aspectRatio,
+                            child: VideoPlayer(_videoCtrl!),
+                          ),
+                        )
+                      : const Center(
+                          child: CircularProgressIndicator(
+                            color: Colors.white54,
+                            strokeWidth: 2,
+                          ),
+                        )
                 : Image.network(
                     story.mediaUrl,
                     fit: BoxFit.contain,
@@ -1904,7 +2044,47 @@ class _WorkerStoryViewerScreenState extends State<_WorkerStoryViewerScreen>
                     ),
                   ),
 
-            // ── Top gradient ─────────────────────────────────────────────────
+            if (story.overlayText.trim().isNotEmpty)
+              Positioned(
+                left:
+                    (story.overlayTextX.clamp(0.12, 0.88) *
+                        MediaQuery.of(context).size.width) -
+                    110,
+                top:
+                    (story.overlayTextY.clamp(0.18, 0.78) *
+                        MediaQuery.of(context).size.height) -
+                    28,
+                child: Container(
+                  constraints: const BoxConstraints(maxWidth: 220),
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 16,
+                    vertical: 10,
+                  ),
+                  decoration: BoxDecoration(
+                    color: Colors.black.withValues(alpha: 0.28),
+                    borderRadius: BorderRadius.circular(20),
+                  ),
+                  child: Text(
+                    story.overlayText,
+                    textAlign: TextAlign.center,
+                    style: const TextStyle(
+                      color: Colors.white,
+                      fontSize: 24,
+                      fontWeight: FontWeight.w800,
+                      height: 1.15,
+                      shadows: [
+                        Shadow(
+                          color: Colors.black54,
+                          blurRadius: 12,
+                          offset: Offset(0, 3),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+              ),
+
+            //   Top gradient                         ─
             Positioned(
               top: 0,
               left: 0,
@@ -1924,7 +2104,7 @@ class _WorkerStoryViewerScreenState extends State<_WorkerStoryViewerScreen>
               ),
             ),
 
-            // ── Bottom gradient ──────────────────────────────────────────────
+            //   Bottom gradient
             Positioned(
               bottom: 0,
               left: 0,
@@ -1944,7 +2124,7 @@ class _WorkerStoryViewerScreenState extends State<_WorkerStoryViewerScreen>
               ),
             ),
 
-            // ── Top overlay: progress + user info + buttons ──────────────────
+            //   Top overlay: progress + user info + buttons
             SafeArea(
               bottom: false,
               child: Column(
@@ -2074,7 +2254,7 @@ class _WorkerStoryViewerScreenState extends State<_WorkerStoryViewerScreen>
               ),
             ),
 
-            // ── Bottom overlay: views + caption ─────────────────────────────
+            //   Bottom overlay: views + caption               ─
             Positioned(
               bottom: 0,
               left: 0,
@@ -2218,95 +2398,7 @@ class _BottomNavItem extends StatelessWidget {
   }
 }
 
-class _HomeMessagesNavItem extends StatelessWidget {
-  const _HomeMessagesNavItem({required this.uid, required this.onTap});
-
-  final String uid;
-  final VoidCallback onTap;
-
-  @override
-  Widget build(BuildContext context) {
-    const color = Color(0xFF7A859E);
-    return Material(
-      color: Colors.transparent,
-      child: InkWell(
-        onTap: onTap,
-        borderRadius: BorderRadius.circular(16),
-        child: Padding(
-          padding: const EdgeInsets.symmetric(vertical: 6),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              StreamBuilder<QuerySnapshot>(
-                stream: uid.isEmpty
-                    ? const Stream.empty()
-                    : FirebaseFirestore.instance
-                          .collection('conversations')
-                          .where('participants', arrayContains: uid)
-                          .snapshots(),
-                builder: (context, snapshot) {
-                  bool hasUnread = false;
-                  if (snapshot.hasData) {
-                    hasUnread = snapshot.data!.docs.any((doc) {
-                      final data = doc.data() as Map<String, dynamic>;
-                      final unreadBy =
-                          data['unreadBy'] as Map<String, dynamic>? ?? {};
-                      return (unreadBy[uid] ?? 0) > 0;
-                    });
-                  }
-                  return Stack(
-                    clipBehavior: Clip.none,
-                    children: [
-                      const Icon(
-                        LucideIcons.messageCircle,
-                        color: color,
-                        size: 22,
-                      ),
-                      if (hasUnread)
-                        Positioned(
-                          top: -2,
-                          right: -4,
-                          child: Container(
-                            width: 8,
-                            height: 8,
-                            decoration: const BoxDecoration(
-                              color: Color(0xFFFF3B30),
-                              shape: BoxShape.circle,
-                            ),
-                          ),
-                        ),
-                    ],
-                  );
-                },
-              ),
-              const SizedBox(height: 6),
-              const Text(
-                'Messages',
-                style: TextStyle(
-                  color: color,
-                  fontSize: 12.5,
-                  fontWeight: FontWeight.w600,
-                ),
-              ),
-              const SizedBox(height: 7),
-              AnimatedContainer(
-                duration: const Duration(milliseconds: 180),
-                width: 0,
-                height: 3,
-                decoration: const BoxDecoration(
-                  color: kHomeBlue,
-                  borderRadius: BorderRadius.all(Radius.circular(999)),
-                ),
-              ),
-            ],
-          ),
-        ),
-      ),
-    );
-  }
-}
-
-// ── Animated Instagram-style story ring ──────────────────────────────────────
+//   Animated Instagram-style story ring
 
 class _AnimatedStoryRing extends StatefulWidget {
   const _AnimatedStoryRing({required this.child});

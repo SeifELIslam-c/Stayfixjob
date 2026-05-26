@@ -10,8 +10,10 @@ import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:google_fonts/google_fonts.dart';
+import 'package:hotel_lux_profile/models/task_model.dart';
 import 'package:hotel_lux_profile/screens/messages_screen.dart';
 import 'package:hotel_lux_profile/services/messages_repository.dart';
+import 'package:hotel_lux_profile/services/task_service.dart';
 import 'package:hotel_lux_profile/services/vps_media_service.dart';
 import 'package:http/http.dart' as http;
 import 'package:hotel_lux_profile/widgets/address_picker.dart';
@@ -29,6 +31,7 @@ const _kThreadPeerBubble = Color(0xFFF0F6FF);
 const _kChatBackgroundAsset =
     'lib/assets/stayfixjob_chat_background_dark_doodle.png';
 const _kAccent = kMessagesBlue;
+const _kSendGreen = Color(0xFF22C55E);
 
 const Map<String, IconData> _kReactionIcons = {
   'thumbs_up': LucideIcons.thumbsUp,
@@ -121,6 +124,7 @@ class _WorkerChatThreadScreenState extends State<WorkerChatThreadScreen> {
   Timer? _recordingTicker;
   Duration _recordingElapsed = Duration.zero;
   bool _isMarkingSeen = false;
+  StreamSubscription<DocumentSnapshot<Map<String, dynamic>>>? _readSubscription;
   StreamSubscription<Amplitude>? _amplitudeSub;
   final List<int> _recordingWaveform = [];
   Timer? _typingTimer;
@@ -131,8 +135,18 @@ class _WorkerChatThreadScreenState extends State<WorkerChatThreadScreen> {
   double _holdDy = 0;
   bool _recordCanceledByGesture = false;
   String? _lastIncomingMessageId;
+
+  // Conversation type + missions
+  String _conversationType = 'intervenant';
+  String _currentUserAccountType = '';
+  bool _isMissionStripMinimized = false;
+  List<TaskModel> _allMissions = [];
+  List<TaskModel> _activeMissions = [];
+  StreamSubscription<List<TaskModel>>? _tasksSubscription;
+  final TaskService _taskService = TaskService();
   String? _ephemeralBannerText;
   Timer? _ephemeralBannerTimer;
+  final Map<String, ProfileSummary> _groupSenderProfiles = {};
 
   // Pagination
   final List<QueryDocumentSnapshot<Map<String, dynamic>>> _olderMessages = [];
@@ -153,6 +167,8 @@ class _WorkerChatThreadScreenState extends State<WorkerChatThreadScreen> {
 
   @override
   void dispose() {
+    _readSubscription?.cancel();
+    _tasksSubscription?.cancel();
     _recordingTicker?.cancel();
     _typingTimer?.cancel();
     _amplitudeSub?.cancel();
@@ -179,6 +195,27 @@ class _WorkerChatThreadScreenState extends State<WorkerChatThreadScreen> {
         .orderBy('createdAt')
         .limitToLast(50)
         .snapshots();
+
+    _readSubscription = _conversationStream.listen((snapshot) {
+      final data = snapshot.data();
+      if (data == null || !mounted) return;
+
+      // Track conversation type for group info routing
+      final convType = (data['type'] as String?) ?? 'intervenant';
+      if (convType != _conversationType) {
+        setState(() => _conversationType = convType);
+        _startTasksSubscription();
+      }
+
+      final uid = FirebaseAuth.instance.currentUser?.uid ?? '';
+      final lastMessageAt = data['lastMessageAt'];
+      if (lastMessageAt is! Timestamp) return;
+      final lastReadAt = data['lastReadAt'];
+      final myLastRead = lastReadAt is Map ? lastReadAt[uid] : null;
+      if (myLastRead is! Timestamp || lastMessageAt.compareTo(myLastRead) > 0) {
+        _messagesRepository.touchLastReadAt(widget.conversationId);
+      }
+    });
     if (widget.initialBannerText?.trim().isNotEmpty == true) {
       _showEphemeralBanner(widget.initialBannerText!.trim());
     }
@@ -191,6 +228,103 @@ class _WorkerChatThreadScreenState extends State<WorkerChatThreadScreen> {
       }
     });
     unawaited(_initCameras());
+    unawaited(_loadAccountType());
+    _startTasksSubscription();
+  }
+
+  Future<void> _loadAccountType() async {
+    final uid = FirebaseAuth.instance.currentUser?.uid;
+    if (uid == null) return;
+    final doc = await FirebaseFirestore.instance
+        .collection('users')
+        .doc(uid)
+        .get();
+    if (mounted) {
+      setState(() {
+        _currentUserAccountType =
+            (doc.data()?['accountType'] as String?) ?? 'worker';
+      });
+    }
+  }
+
+  void _startTasksSubscription() {
+    _tasksSubscription?.cancel();
+    _tasksSubscription = _taskService.tasksStream(widget.conversationId).listen(
+      (tasks) {
+        if (!mounted) return;
+        setState(() {
+          _allMissions = tasks.where(_shouldDisplayTask).toList();
+          _activeMissions = _allMissions.where(_shouldShowLiveMission).toList();
+        });
+      },
+    );
+  }
+
+  bool get _canCreateMission =>
+      _currentUserAccountType == 'manager' ||
+      _currentUserAccountType == 'apartment_manager';
+
+  bool _canAcceptTask(TaskModel task) {
+    final uid = FirebaseAuth.instance.currentUser?.uid ?? '';
+    if (task.status != 'open') return false;
+    if (task.createdById == uid) return false;
+    if (_canCreateMission) return false;
+    if (task.isGroupAssignment) return false;
+    final assignedToId = task.assignedToId ?? '';
+    return assignedToId.isEmpty || assignedToId == uid;
+  }
+
+  bool _canCompleteTask(TaskModel task) {
+    final uid = FirebaseAuth.instance.currentUser?.uid ?? '';
+    if (task.createdById == uid) return false;
+    if (task.isGroupAssignment) {
+      return task.assignedMemberIds.contains(uid) &&
+          !task.completedBy.contains(uid) &&
+          !task.isFullyCompleted;
+    }
+    if (task.status != 'accepted') return false;
+    return task.acceptedBy == uid;
+  }
+
+  bool _shouldDisplayTask(TaskModel task) {
+    final uid = FirebaseAuth.instance.currentUser?.uid ?? '';
+    if (_canCreateMission) return true;
+    if (task.isGroupAssignment) {
+      return task.assignedMemberIds.contains(uid);
+    }
+    final assignedToId = task.assignedToId?.trim() ?? '';
+    return assignedToId.isEmpty ||
+        assignedToId == uid ||
+        task.acceptedBy == uid;
+  }
+
+  bool _shouldShowLiveMission(TaskModel task) {
+    if (task.isDeleted) return false;
+    if (task.status == 'completed' || task.isFullyCompleted) return false;
+    return true;
+  }
+
+  void _openMissionHistoryScreen() {
+    Navigator.of(context).push(
+      MaterialPageRoute(
+        builder: (_) => _MissionHistoryScreen(
+          tasks: _allMissions,
+          canCreateMission: _canCreateMission,
+        ),
+      ),
+    );
+  }
+
+  Future<ProfileSummary?> _loadGroupSenderProfile(String userId) async {
+    final trimmedUserId = userId.trim();
+    if (trimmedUserId.isEmpty) return null;
+    final cached = _groupSenderProfiles[trimmedUserId];
+    if (cached != null) return cached;
+    final profile = await _messagesRepository.loadProfileById(trimmedUserId);
+    if (profile != null && mounted) {
+      setState(() => _groupSenderProfiles[trimmedUserId] = profile);
+    }
+    return profile;
   }
 
   Future<void> _initCameras() async {
@@ -215,8 +349,9 @@ class _WorkerChatThreadScreenState extends State<WorkerChatThreadScreen> {
         setState(() => _hasMoreMessages = false);
       } else {
         final existingIds = _olderMessages.map((d) => d.id).toSet();
-        final newDocs =
-            snap.docs.where((d) => !existingIds.contains(d.id)).toList();
+        final newDocs = snap.docs
+            .where((d) => !existingIds.contains(d.id))
+            .toList();
         setState(() {
           _olderMessages.insertAll(0, newDocs);
           _oldestStreamDoc = snap.docs.first;
@@ -229,7 +364,7 @@ class _WorkerChatThreadScreenState extends State<WorkerChatThreadScreen> {
   }
 
   Future<void> _startVideoRecording() async {
-    if (_cameras.isEmpty) return;
+    if (_cameras.isEmpty || _isRecordingVideo) return;
     final ctrl = CameraController(
       _cameras.first,
       ResolutionPreset.medium,
@@ -246,8 +381,10 @@ class _WorkerChatThreadScreenState extends State<WorkerChatThreadScreen> {
         _isRecordingVideo = true;
       });
       await ctrl.startVideoRecording();
-      _recordingVideoTimer =
-          Timer(const Duration(seconds: 15), _stopVideoRecording);
+      _recordingVideoTimer = Timer(
+        const Duration(seconds: 15),
+        _stopVideoRecording,
+      );
     } catch (e) {
       await ctrl.dispose();
     }
@@ -294,6 +431,19 @@ class _WorkerChatThreadScreenState extends State<WorkerChatThreadScreen> {
     }
   }
 
+  Future<void> _cancelVideoRecording() async {
+    _recordingVideoTimer?.cancel();
+    final ctrl = _cameraController;
+    setState(() {
+      _isRecordingVideo = false;
+      _cameraController = null;
+    });
+    try {
+      await ctrl?.stopVideoRecording();
+    } catch (_) {}
+    await ctrl?.dispose();
+  }
+
   Future<void> _deleteSelected() async {
     final ids = List<String>.from(_selectedMessageIds);
     setState(() => _selectedMessageIds.clear());
@@ -307,7 +457,8 @@ class _WorkerChatThreadScreenState extends State<WorkerChatThreadScreen> {
       for (final doc in docs) {
         if (doc.exists) {
           batch.delete(doc.reference);
-          final fileIds = (doc.data()?['fileIds'] as List?)?.cast<String>() ?? [];
+          final fileIds =
+              (doc.data()?['fileIds'] as List?)?.cast<String>() ?? [];
           allFileIds.addAll(fileIds);
         }
       }
@@ -459,20 +610,48 @@ class _WorkerChatThreadScreenState extends State<WorkerChatThreadScreen> {
                     ),
                     _ChatOptionTile(
                       icon: LucideIcons.info,
-                      title: 'Contact info',
+                      title: _conversationType == 'team'
+                          ? 'Group info'
+                          : 'Contact info',
                       onTap: () async {
                         Navigator.pop(context);
-                        await Navigator.of(this.context).push(
-                          MaterialPageRoute(
-                            builder: (_) => _ChatContactInfoScreen(
-                              conversationId: widget.conversationId,
-                              title: widget.title,
-                              subtitle: widget.subtitle,
-                              avatarBase64: widget.avatarBase64,
-                              avatarUrl: widget.avatarUrl,
+                        if (_conversationType == 'team') {
+                          await Navigator.of(this.context).push(
+                            MaterialPageRoute(
+                              builder: (_) => _ChatGroupInfoScreen(
+                                conversationId: widget.conversationId,
+                              ),
                             ),
-                          ),
-                        );
+                          );
+                        } else {
+                          await Navigator.of(this.context).push(
+                            MaterialPageRoute(
+                              builder: (_) => _ChatContactInfoScreen(
+                                conversationId: widget.conversationId,
+                                title: widget.title,
+                                subtitle: widget.subtitle,
+                                avatarBase64: widget.avatarBase64,
+                                avatarUrl: widget.avatarUrl,
+                              ),
+                            ),
+                          );
+                        }
+                      },
+                    ),
+                    _ChatOptionTile(
+                      icon: LucideIcons.shieldAlert,
+                      title: 'Report abuse',
+                      onTap: () async {
+                        Navigator.pop(context);
+                        await _showReportAbuseSheet();
+                      },
+                    ),
+                    _ChatOptionTile(
+                      icon: LucideIcons.flag,
+                      title: 'Missions',
+                      onTap: () {
+                        Navigator.pop(context);
+                        _openMissionHistoryScreen();
                       },
                     ),
                     _ChatOptionTile(
@@ -494,6 +673,151 @@ class _WorkerChatThreadScreenState extends State<WorkerChatThreadScreen> {
     );
   }
 
+  Future<void> _showReportAbuseSheet() async {
+    final detailsController = TextEditingController();
+    String reason = 'Harcelement ou comportement abusif';
+
+    final submitted = await showModalBottomSheet<bool>(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: Colors.transparent,
+      builder: (context) {
+        return Padding(
+          padding: EdgeInsets.only(
+            bottom: MediaQuery.of(context).viewInsets.bottom,
+          ),
+          child: StatefulBuilder(
+            builder: (context, setModalState) {
+              return SafeArea(
+                top: false,
+                child: Container(
+                  margin: const EdgeInsets.fromLTRB(14, 0, 14, 14),
+                  padding: const EdgeInsets.fromLTRB(18, 16, 18, 18),
+                  decoration: BoxDecoration(
+                    color: Colors.white,
+                    borderRadius: BorderRadius.circular(28),
+                  ),
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Container(
+                        width: 42,
+                        height: 4,
+                        decoration: BoxDecoration(
+                          color: Colors.black.withValues(alpha: 0.12),
+                          borderRadius: BorderRadius.circular(999),
+                        ),
+                      ),
+                      const SizedBox(height: 18),
+                      Text(
+                        'Signaler une conversation',
+                        style: GoogleFonts.inter(
+                          color: kMessagesText,
+                          fontSize: 18,
+                          fontWeight: FontWeight.w800,
+                        ),
+                      ),
+                      const SizedBox(height: 8),
+                      Text(
+                        'Expliquez rapidement ce qui pose probleme. Votre signalement sera ajoute a la moderation.',
+                        style: GoogleFonts.inter(
+                          color: kMessagesBody,
+                          fontSize: 13,
+                          height: 1.45,
+                        ),
+                      ),
+                      const SizedBox(height: 16),
+                      DropdownButtonFormField<String>(
+                        value: reason,
+                        decoration: InputDecoration(
+                          labelText: 'Motif',
+                          border: OutlineInputBorder(
+                            borderRadius: BorderRadius.circular(16),
+                          ),
+                        ),
+                        items: const [
+                          DropdownMenuItem(
+                            value: 'Harcelement ou comportement abusif',
+                            child: Text('Harcelement ou abus'),
+                          ),
+                          DropdownMenuItem(
+                            value: 'Spam ou contenu non sollicite',
+                            child: Text('Spam'),
+                          ),
+                          DropdownMenuItem(
+                            value: 'Contenu inapproprie',
+                            child: Text('Contenu inapproprie'),
+                          ),
+                          DropdownMenuItem(
+                            value: 'Usurpation ou fraude',
+                            child: Text('Usurpation ou fraude'),
+                          ),
+                        ],
+                        onChanged: (value) {
+                          if (value == null) return;
+                          setModalState(() => reason = value);
+                        },
+                      ),
+                      const SizedBox(height: 12),
+                      TextField(
+                        controller: detailsController,
+                        minLines: 3,
+                        maxLines: 5,
+                        decoration: InputDecoration(
+                          hintText: 'Details supplementaires (facultatif)',
+                          border: OutlineInputBorder(
+                            borderRadius: BorderRadius.circular(16),
+                          ),
+                        ),
+                      ),
+                      const SizedBox(height: 16),
+                      Row(
+                        children: [
+                          Expanded(
+                            child: OutlinedButton(
+                              onPressed: () => Navigator.of(context).pop(false),
+                              child: const Text('Annuler'),
+                            ),
+                          ),
+                          const SizedBox(width: 12),
+                          Expanded(
+                            child: FilledButton.icon(
+                              onPressed: () => Navigator.of(context).pop(true),
+                              icon: const Icon(LucideIcons.shieldAlert, size: 16),
+                              label: const Text('Envoyer'),
+                            ),
+                          ),
+                        ],
+                      ),
+                    ],
+                  ),
+                ),
+              );
+            },
+          ),
+        );
+      },
+    );
+
+    final details = detailsController.text.trim();
+    detailsController.dispose();
+    if (submitted != true) return;
+
+    try {
+      await _messagesRepository.reportConversationAbuse(
+        conversationId: widget.conversationId,
+        reason: reason,
+        details: details,
+      );
+      if (!mounted) return;
+      _showSnack('Signalement envoye. Merci.');
+    } catch (_) {
+      if (!mounted) return;
+      _showSnack('Impossible d envoyer le signalement pour le moment.');
+    }
+  }
+
   Future<void> _clearChatHistory() async {
     try {
       await _clearConversationHistoryById(widget.conversationId);
@@ -502,6 +826,445 @@ class _WorkerChatThreadScreenState extends State<WorkerChatThreadScreen> {
       if (!mounted) return;
       _showSnack('Impossible de vider cette conversation pour le moment.');
     }
+  }
+
+  Future<List<ProfileSummary>> _loadEligibleMissionMembers() async {
+    final conversation = await _conversationRef.get();
+    final data = conversation.data() ?? const <String, dynamic>{};
+    final participantIds = ((data['participants'] as List?) ?? const [])
+        .map((entry) => entry.toString().trim())
+        .where((entry) => entry.isNotEmpty)
+        .toSet()
+        .toList();
+    final currentUid = FirebaseAuth.instance.currentUser?.uid ?? '';
+    final result = <ProfileSummary>[];
+    for (final participantId in participantIds) {
+      if (participantId == currentUid) continue;
+      final profile = await _messagesRepository.loadProfileById(participantId);
+      if (profile == null) continue;
+      final accountType = profile.accountType ?? '';
+      if (accountType == 'manager' || accountType == 'apartment_manager') {
+        continue;
+      }
+      result.add(profile);
+    }
+    result.sort((a, b) => a.name.toLowerCase().compareTo(b.name.toLowerCase()));
+    return result;
+  }
+
+  Future<List<ProfileSummary>> _pickMissionAssignees(
+    List<ProfileSummary> eligibleMembers,
+  ) async {
+    final selectedIds = <String>{};
+    final picked = await showModalBottomSheet<List<ProfileSummary>>(
+      context: context,
+      backgroundColor: Colors.transparent,
+      isScrollControlled: true,
+      builder: (sheetContext) {
+        return StatefulBuilder(
+          builder: (context, setModalState) {
+            return SafeArea(
+              top: false,
+              child: Container(
+                padding: const EdgeInsets.fromLTRB(20, 16, 20, 24),
+                decoration: const BoxDecoration(
+                  color: Colors.white,
+                  borderRadius: BorderRadius.vertical(top: Radius.circular(32)),
+                ),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Center(
+                      child: Container(
+                        width: 44,
+                        height: 4,
+                        decoration: BoxDecoration(
+                          color: const Color(0xFFD6E4FF),
+                          borderRadius: BorderRadius.circular(999),
+                        ),
+                      ),
+                    ),
+                    const SizedBox(height: 16),
+                    Text(
+                      'Choisir les membres qui recevront cette mission',
+                      style: GoogleFonts.inter(
+                        color: kMessagesText,
+                        fontSize: 16,
+                        fontWeight: FontWeight.w800,
+                      ),
+                    ),
+                    const SizedBox(height: 8),
+                    Text(
+                      'Selectionnez uniquement les intervenants eligibles du groupe.',
+                      style: GoogleFonts.inter(
+                        color: kMessagesBody,
+                        fontSize: 13,
+                        fontWeight: FontWeight.w500,
+                      ),
+                    ),
+                    const SizedBox(height: 16),
+                    Flexible(
+                      child: ListView.separated(
+                        shrinkWrap: true,
+                        itemCount: eligibleMembers.length,
+                        separatorBuilder: (_, _) => const SizedBox(height: 10),
+                        itemBuilder: (context, index) {
+                          final member = eligibleMembers[index];
+                          final selected = selectedIds.contains(member.userId);
+                          return InkWell(
+                            onTap: () {
+                              setModalState(() {
+                                if (selected) {
+                                  selectedIds.remove(member.userId);
+                                } else {
+                                  selectedIds.add(member.userId);
+                                }
+                              });
+                            },
+                            borderRadius: BorderRadius.circular(20),
+                            child: Container(
+                              padding: const EdgeInsets.all(14),
+                              decoration: BoxDecoration(
+                                color: selected
+                                    ? const Color(0xFFEFF6FF)
+                                    : Colors.white,
+                                borderRadius: BorderRadius.circular(20),
+                                border: Border.all(
+                                  color: selected
+                                      ? const Color(0xFF93C5FD)
+                                      : const Color(0xFFDCE7FA),
+                                ),
+                              ),
+                              child: Row(
+                                children: [
+                                  CircleAvatar(
+                                    radius: 22,
+                                    backgroundColor: const Color(0xFFEFF6FF),
+                                    backgroundImage: member.avatarImage,
+                                    child: member.avatarImage == null
+                                        ? Text(
+                                            member.initials,
+                                            style: GoogleFonts.inter(
+                                              color: _kAccent,
+                                              fontSize: 12,
+                                              fontWeight: FontWeight.w800,
+                                            ),
+                                          )
+                                        : null,
+                                  ),
+                                  const SizedBox(width: 12),
+                                  Expanded(
+                                    child: Column(
+                                      crossAxisAlignment:
+                                          CrossAxisAlignment.start,
+                                      children: [
+                                        Text(
+                                          member.name,
+                                          style: GoogleFonts.inter(
+                                            color: kMessagesText,
+                                            fontSize: 14,
+                                            fontWeight: FontWeight.w700,
+                                          ),
+                                        ),
+                                        const SizedBox(height: 4),
+                                        Text(
+                                          member.badgeLabel,
+                                          style: GoogleFonts.inter(
+                                            color: member.isStayFixConcierge
+                                                ? const Color(0xFF9A6C00)
+                                                : kMessagesBody,
+                                            fontSize: 12,
+                                            fontWeight: FontWeight.w600,
+                                          ),
+                                        ),
+                                      ],
+                                    ),
+                                  ),
+                                  Icon(
+                                    selected
+                                        ? LucideIcons.checkCircle2
+                                        : LucideIcons.circle,
+                                    color: selected
+                                        ? const Color(0xFF16A34A)
+                                        : const Color(0xFF94A3B8),
+                                  ),
+                                ],
+                              ),
+                            ),
+                          );
+                        },
+                      ),
+                    ),
+                    const SizedBox(height: 16),
+                    SizedBox(
+                      width: double.infinity,
+                      child: ElevatedButton(
+                        onPressed: selectedIds.isEmpty
+                            ? null
+                            : () {
+                                Navigator.pop(
+                                  sheetContext,
+                                  eligibleMembers
+                                      .where(
+                                        (member) =>
+                                            selectedIds.contains(member.userId),
+                                      )
+                                      .toList(),
+                                );
+                              },
+                        style: ElevatedButton.styleFrom(
+                          backgroundColor: _kAccent,
+                          foregroundColor: Colors.white,
+                          minimumSize: const Size.fromHeight(52),
+                          shape: RoundedRectangleBorder(
+                            borderRadius: BorderRadius.circular(18),
+                          ),
+                        ),
+                        child: const Text(
+                          'Choisir les membres qui recevront cette mission',
+                          textAlign: TextAlign.center,
+                          style: TextStyle(fontWeight: FontWeight.w800),
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            );
+          },
+        );
+      },
+    );
+    return picked ?? const <ProfileSummary>[];
+  }
+
+  Future<void> _showCreateMissionSheet() async {
+    final eligibleMembers = await _loadEligibleMissionMembers();
+    final titleController = TextEditingController();
+    final instructionController = TextEditingController();
+    List<ProfileSummary> selectedMembers = _conversationType == 'team'
+        ? const <ProfileSummary>[]
+        : (eligibleMembers.isNotEmpty
+              ? <ProfileSummary>[eligibleMembers.first]
+              : const <ProfileSummary>[]);
+
+    if (!mounted) return;
+    await showModalBottomSheet<void>(
+      context: context,
+      backgroundColor: Colors.transparent,
+      isScrollControlled: true,
+      builder: (sheetContext) {
+        return StatefulBuilder(
+          builder: (context, setModalState) {
+            Future<void> submit() async {
+              final title = titleController.text.trim();
+              final instruction = instructionController.text.trim();
+              if (title.isEmpty || instruction.isEmpty) return;
+              if (_conversationType == 'team' && selectedMembers.isEmpty) {
+                return;
+              }
+              final currentUser = FirebaseAuth.instance.currentUser;
+              if (currentUser == null) return;
+
+              final assignedIds = selectedMembers
+                  .map((member) => member.userId)
+                  .toList();
+              final assignedNames = {
+                for (final member in selectedMembers)
+                  member.userId: member.name,
+              };
+
+              await _taskService.createTask(
+                conversationId: widget.conversationId,
+                title: title,
+                instruction: instruction,
+                createdById: currentUser.uid,
+                createdByName: currentUser.displayName ?? widget.title,
+                assignedToId: _conversationType == 'team'
+                    ? null
+                    : assignedIds.isNotEmpty
+                    ? assignedIds.first
+                    : null,
+                assignedToName: _conversationType == 'team'
+                    ? null
+                    : selectedMembers.isNotEmpty
+                    ? selectedMembers.first.name
+                    : null,
+                assignedMemberIds: _conversationType == 'team'
+                    ? assignedIds
+                    : const <String>[],
+                assignedMemberNames: _conversationType == 'team'
+                    ? assignedNames
+                    : const <String, String>{},
+              );
+              if (!sheetContext.mounted) return;
+              Navigator.pop(sheetContext);
+            }
+
+            return SafeArea(
+              top: false,
+              child: Padding(
+                padding: EdgeInsets.only(
+                  bottom: MediaQuery.viewInsetsOf(sheetContext).bottom,
+                ),
+                child: Container(
+                  padding: const EdgeInsets.fromLTRB(20, 16, 20, 24),
+                  decoration: const BoxDecoration(
+                    color: Colors.white,
+                    borderRadius: BorderRadius.vertical(
+                      top: Radius.circular(32),
+                    ),
+                  ),
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Center(
+                        child: Container(
+                          width: 44,
+                          height: 4,
+                          decoration: BoxDecoration(
+                            color: const Color(0xFFD6E4FF),
+                            borderRadius: BorderRadius.circular(999),
+                          ),
+                        ),
+                      ),
+                      const SizedBox(height: 16),
+                      Text(
+                        'Creer une mission',
+                        style: GoogleFonts.inter(
+                          color: kMessagesText,
+                          fontSize: 17,
+                          fontWeight: FontWeight.w800,
+                        ),
+                      ),
+                      const SizedBox(height: 14),
+                      TextField(
+                        controller: titleController,
+                        decoration: _missionInputDecoration(
+                          'Titre de la mission',
+                        ),
+                      ),
+                      const SizedBox(height: 12),
+                      TextField(
+                        controller: instructionController,
+                        maxLines: 3,
+                        decoration: _missionInputDecoration('Instruction'),
+                      ),
+                      if (_conversationType == 'team') ...[
+                        const SizedBox(height: 14),
+                        SizedBox(
+                          width: double.infinity,
+                          child: OutlinedButton(
+                            onPressed: eligibleMembers.isEmpty
+                                ? null
+                                : () async {
+                                    final picked = await _pickMissionAssignees(
+                                      eligibleMembers,
+                                    );
+                                    if (picked.isEmpty) return;
+                                    setModalState(
+                                      () => selectedMembers = picked,
+                                    );
+                                  },
+                            style: OutlinedButton.styleFrom(
+                              foregroundColor: _kAccent,
+                              side: const BorderSide(color: Color(0xFFBFDBFE)),
+                              padding: const EdgeInsets.symmetric(
+                                horizontal: 16,
+                                vertical: 16,
+                              ),
+                              shape: RoundedRectangleBorder(
+                                borderRadius: BorderRadius.circular(18),
+                              ),
+                            ),
+                            child: const Text(
+                              'Choisir les membres qui recevront cette mission',
+                              textAlign: TextAlign.center,
+                              style: TextStyle(fontWeight: FontWeight.w800),
+                            ),
+                          ),
+                        ),
+                        if (selectedMembers.isNotEmpty) ...[
+                          const SizedBox(height: 10),
+                          Wrap(
+                            spacing: 8,
+                            runSpacing: 8,
+                            children: selectedMembers
+                                .map(
+                                  (member) => Container(
+                                    padding: const EdgeInsets.symmetric(
+                                      horizontal: 10,
+                                      vertical: 6,
+                                    ),
+                                    decoration: BoxDecoration(
+                                      color: const Color(0xFFEFF6FF),
+                                      borderRadius: BorderRadius.circular(999),
+                                    ),
+                                    child: Text(
+                                      member.name,
+                                      style: GoogleFonts.inter(
+                                        color: _kAccent,
+                                        fontSize: 12,
+                                        fontWeight: FontWeight.w700,
+                                      ),
+                                    ),
+                                  ),
+                                )
+                                .toList(),
+                          ),
+                        ],
+                      ],
+                      const SizedBox(height: 16),
+                      SizedBox(
+                        width: double.infinity,
+                        child: ElevatedButton(
+                          onPressed: submit,
+                          style: ElevatedButton.styleFrom(
+                            backgroundColor: const Color(0xFF16A34A),
+                            foregroundColor: Colors.white,
+                            minimumSize: const Size.fromHeight(52),
+                            shape: RoundedRectangleBorder(
+                              borderRadius: BorderRadius.circular(18),
+                            ),
+                          ),
+                          child: const Text(
+                            'Publier la mission',
+                            style: TextStyle(fontWeight: FontWeight.w800),
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            );
+          },
+        );
+      },
+    );
+  }
+
+  InputDecoration _missionInputDecoration(String hint) {
+    return InputDecoration(
+      hintText: hint,
+      filled: true,
+      fillColor: const Color(0xFFF8FBFF),
+      contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 16),
+      border: OutlineInputBorder(
+        borderRadius: BorderRadius.circular(18),
+        borderSide: const BorderSide(color: Color(0xFFDCE7FA)),
+      ),
+      enabledBorder: OutlineInputBorder(
+        borderRadius: BorderRadius.circular(18),
+        borderSide: const BorderSide(color: Color(0xFFDCE7FA)),
+      ),
+      focusedBorder: OutlineInputBorder(
+        borderRadius: BorderRadius.circular(18),
+        borderSide: const BorderSide(color: Color(0xFF93C5FD)),
+      ),
+    );
   }
 
   Future<void> _reactToMessage(String messageId, String reaction) async {
@@ -534,8 +1297,8 @@ class _WorkerChatThreadScreenState extends State<WorkerChatThreadScreen> {
     try {
       final picked = await _picker.pickImage(
         source: source,
-        imageQuality: 90,
-        maxWidth: 2200,
+        imageQuality: 82,
+        maxWidth: 1600,
       );
       if (picked == null) return;
 
@@ -786,24 +1549,33 @@ class _WorkerChatThreadScreenState extends State<WorkerChatThreadScreen> {
       _holdDx = 0;
       _holdDy = 0;
 
-      final uploaded = await VpsMediaService.uploadFile(
-        file: File(resolvedPath),
-        category: 'chat-audio',
-        conversationId: widget.conversationId,
-        durationMs: durationMs,
-      );
+      if (mounted) {
+        setState(() => _uploadingMedia = true);
+      }
+      try {
+        final uploaded = await VpsMediaService.uploadFile(
+          file: File(resolvedPath),
+          category: 'chat-audio',
+          conversationId: widget.conversationId,
+          durationMs: durationMs,
+        );
 
-      await _sendMessage(
-        audioUrl: uploaded.url,
-        audioMimeType: uploaded.mimeType,
-        audioFileId: uploaded.fileId,
-        audioDurationMs: uploaded.durationMs ?? durationMs,
-        audioSizeBytes: uploaded.sizeBytes,
-        audioWaveform: _recordingWaveform.isEmpty
-            ? null
-            : List<int>.from(_recordingWaveform),
-        lastMessage: 'Message vocal',
-      );
+        await _sendMessage(
+          audioUrl: uploaded.url,
+          audioMimeType: uploaded.mimeType,
+          audioFileId: uploaded.fileId,
+          audioDurationMs: uploaded.durationMs ?? durationMs,
+          audioSizeBytes: uploaded.sizeBytes,
+          audioWaveform: _recordingWaveform.isEmpty
+              ? null
+              : List<int>.from(_recordingWaveform),
+          lastMessage: 'Message vocal',
+        );
+      } finally {
+        if (mounted) {
+          setState(() => _uploadingMedia = false);
+        }
+      }
 
       try {
         await File(resolvedPath).delete();
@@ -852,6 +1624,7 @@ class _WorkerChatThreadScreenState extends State<WorkerChatThreadScreen> {
   }) async {
     final user = FirebaseAuth.instance.currentUser;
     if (user == null) return;
+    final profile = await _messagesRepository.loadCurrentProfile();
 
     final fileIds = <String>[
       if (imageFileId != null && imageFileId.isNotEmpty) imageFileId,
@@ -895,6 +1668,11 @@ class _WorkerChatThreadScreenState extends State<WorkerChatThreadScreen> {
           'longitude': longitude,
           'fileIds': fileIds,
           'mediaStorage': fileIds.isEmpty ? null : 'vps',
+          'senderName': profile?.name ?? user.displayName ?? 'Utilisateur',
+          'senderRole': profile?.badgeLabel,
+          'senderAccountType': profile?.accountType,
+          'senderPhotoUrl': profile?.photoUrl,
+          'senderPhotoBase64': profile?.photoBase64,
           'sentAt': FieldValue.serverTimestamp(),
         },
         lastMessage: lastMessage,
@@ -923,9 +1701,53 @@ class _WorkerChatThreadScreenState extends State<WorkerChatThreadScreen> {
     final data = doc.data();
     final isMine = data['senderId'] == uid;
     final isSelected = _selectedMessageIds.contains(doc.id);
+    final type = (data['type'] as String?)?.trim() ?? 'text';
+    final senderId = (data['senderId'] as String?)?.trim() ?? '';
+    final senderName = (data['senderName'] as String?)?.trim();
+    final senderRole = (data['senderRole'] as String?)?.trim();
+    final senderAccountType = (data['senderAccountType'] as String?)?.trim();
+    final senderPhotoUrl = VpsMediaService.normalizeMediaUrlSync(
+      (data['senderPhotoUrl'] as String?)?.trim(),
+    );
+    final senderPhotoBase64 = (data['senderPhotoBase64'] as String?)?.trim();
+    final cachedProfile = _groupSenderProfiles[senderId];
+    if (_conversationType == 'team' &&
+        !isMine &&
+        senderId.isNotEmpty &&
+        cachedProfile == null) {
+      unawaited(_loadGroupSenderProfile(senderId));
+    }
+
+    if (type == 'system') {
+      return _buildSystemMessageCard(data);
+    }
+
+    if (_isSystemLikeTextMessage(data)) {
+      return _buildResolvedSystemMessageCard(
+        data,
+        fallbackText: (data['text'] as String?)?.trim() ?? '',
+      );
+    }
+
+    final resolvedSenderName = senderName?.isNotEmpty == true
+        ? senderName!
+        : cachedProfile?.name ?? widget.title;
+    final badgeLabel = cachedProfile?.badgeLabel ?? senderRole ?? '';
+    final isStayFixSender =
+        senderAccountType == 'concierge' ||
+        senderAccountType == 'stayfix_job' ||
+        cachedProfile?.isStayFixConcierge == true;
     final bubble = _MessageBubble(
       key: ValueKey(doc.id),
-      senderName: widget.title,
+      senderName: resolvedSenderName,
+      senderRoleLabel: badgeLabel,
+      senderPhotoUrl: senderPhotoUrl.isNotEmpty
+          ? senderPhotoUrl
+          : cachedProfile?.photoUrl,
+      senderPhotoBase64: senderPhotoBase64 ?? cachedProfile?.photoBase64,
+      showSenderIdentity: _conversationType == 'team' && !isMine,
+      showStayFixBadge:
+          _conversationType == 'team' && !isMine && isStayFixSender,
       messageId: doc.id,
       conversationId: widget.conversationId,
       isMine: isMine,
@@ -938,10 +1760,9 @@ class _WorkerChatThreadScreenState extends State<WorkerChatThreadScreen> {
         (data['audioUrl'] as String?)?.trim(),
       ),
       audioDurationMs: (data['audioDurationMs'] as num?)?.toInt(),
-      audioWaveform:
-          ((data['audioWaveform'] as List?) ?? const [])
-              .map((e) => (e as num).toInt())
-              .toList(),
+      audioWaveform: ((data['audioWaveform'] as List?) ?? const [])
+          .map((e) => (e as num).toInt())
+          .toList(),
       videoUrl: VpsMediaService.normalizeMediaUrlSync(
         (data['videoUrl'] as String?)?.trim(),
       ),
@@ -949,18 +1770,13 @@ class _WorkerChatThreadScreenState extends State<WorkerChatThreadScreen> {
       address: (data['address'] as String?)?.trim(),
       latitude: (data['latitude'] as num?)?.toDouble(),
       longitude: (data['longitude'] as num?)?.toDouble(),
-      fileIds:
-          ((data['fileIds'] as List?) ?? const [])
-              .map((e) => '$e')
-              .toList(),
-      deliveredTo:
-          ((data['deliveredTo'] as List?) ?? const [])
-              .map((e) => '$e')
-              .toList(),
-      seenBy:
-          ((data['seenBy'] as List?) ?? const [])
-              .map((e) => '$e')
-              .toList(),
+      fileIds: ((data['fileIds'] as List?) ?? const [])
+          .map((e) => '$e')
+          .toList(),
+      deliveredTo: ((data['deliveredTo'] as List?) ?? const [])
+          .map((e) => '$e')
+          .toList(),
+      seenBy: ((data['seenBy'] as List?) ?? const []).map((e) => '$e').toList(),
       reaction: (data['reaction'] as String?)?.trim(),
       reactionByUserId: (data['reactionByUserId'] as String?)?.trim(),
       createdAt: (data['createdAt'] as Timestamp?)?.toDate(),
@@ -968,9 +1784,7 @@ class _WorkerChatThreadScreenState extends State<WorkerChatThreadScreen> {
       isSelectMode: _isSelectMode,
       onDelete: (fileIds) => _deleteMessage(doc.id, fileIds: fileIds),
       onReact: (reaction) => _reactToMessage(doc.id, reaction),
-      onLongPress: () => setState(
-        () => _selectedMessageIds.add(doc.id),
-      ),
+      onLongPress: () => setState(() => _selectedMessageIds.add(doc.id)),
       onSelectToggle: () => setState(() {
         if (_selectedMessageIds.contains(doc.id)) {
           _selectedMessageIds.remove(doc.id);
@@ -980,6 +1794,715 @@ class _WorkerChatThreadScreenState extends State<WorkerChatThreadScreen> {
       }),
     );
     return bubble;
+  }
+
+  Widget _buildSystemMessageCard(Map<String, dynamic> data) {
+    return _buildResolvedSystemMessageCard(data, fallbackText: null);
+  }
+
+  String _normalizeSystemText(String value) {
+    return value
+        .toLowerCase()
+        .replaceAll('Ã©', 'e')
+        .replaceAll('é', 'e')
+        .replaceAll('Ã¨', 'e')
+        .replaceAll('è', 'e')
+        .replaceAll('Ãª', 'e')
+        .replaceAll('ê', 'e')
+        .replaceAll('Ã ', 'a')
+        .replaceAll('à', 'a')
+        .replaceAll('Ã§', 'c')
+        .replaceAll('ç', 'c');
+  }
+
+  bool _looksLikeMissionSystemText(String normalizedText) {
+    return normalizedText.startsWith('nouvelle mission') ||
+        normalizedText.startsWith('mission supprimee') ||
+        normalizedText.startsWith('mission terminee') ||
+        normalizedText.startsWith('progression mission');
+  }
+
+  bool _looksLikeMemberSystemText(String normalizedText) {
+    return normalizedText.startsWith('membre ajoute') ||
+        normalizedText.startsWith('membre retire') ||
+        normalizedText.contains(' a ajoute ') ||
+        normalizedText.contains(' a ajoutee ') ||
+        normalizedText.contains(' a ete ajoute') ||
+        normalizedText.contains(' a ete retire');
+  }
+
+  bool _isSystemLikeTextMessage(Map<String, dynamic> data) {
+    final text = _normalizeSystemText((data['text'] as String?)?.trim() ?? '');
+    if (text.isEmpty) return false;
+    return _looksLikeMissionSystemText(text) ||
+        _looksLikeMemberSystemText(text);
+  }
+
+  Widget _buildResolvedSystemMessageCard(
+    Map<String, dynamic> data, {
+    String? fallbackText,
+  }) {
+    final text = fallbackText ?? (data['text'] as String?)?.trim() ?? '';
+    final metadata = data['metadata'] is Map
+        ? Map<String, dynamic>.from(data['metadata'] as Map)
+        : const <String, dynamic>{};
+    final event = (metadata['event'] as String?)?.trim() ?? '';
+    final normalizedText = _normalizeSystemText(text);
+
+    String formatAssigneeNames(List<String> names) {
+      final cleaned = names
+          .map((name) => name.trim())
+          .where((name) => name.isNotEmpty)
+          .toList();
+      if (cleaned.isEmpty) return 'Non attribuée';
+      if (cleaned.length == 1) return cleaned.first;
+      if (cleaned.length == 2) return '${cleaned.first} et ${cleaned.last}';
+      return '${cleaned.take(cleaned.length - 1).join(', ')} et ${cleaned.last}';
+    }
+
+    String resolveMissionAudience() {
+      final assignedIds = ((metadata['assignedMemberIds'] as List?) ?? const [])
+          .map((entry) => entry.toString().trim())
+          .where((entry) => entry.isNotEmpty)
+          .toList();
+      final assignedNamesRaw = metadata['assignedMemberNames'];
+      final assignedNamesMap = assignedNamesRaw is Map
+          ? assignedNamesRaw.map(
+              (key, value) => MapEntry(key.toString(), value?.toString() ?? ''),
+            )
+          : const <String, String>{};
+      final names = assignedIds
+          .map((id) => assignedNamesMap[id]?.trim() ?? '')
+          .where((name) => name.isNotEmpty)
+          .toList();
+      if (assignedIds.isEmpty) return 'Tout le monde';
+      return names.length == assignedIds.length
+          ? formatAssigneeNames(names)
+          : formatAssigneeNames(assignedIds);
+    }
+
+    Widget buildBlurNoticeShell({
+      required Widget child,
+      required Color background,
+      required Color border,
+      EdgeInsets padding = const EdgeInsets.symmetric(
+        horizontal: 16,
+        vertical: 10,
+      ),
+      BorderRadius borderRadius = const BorderRadius.all(Radius.circular(24)),
+    }) {
+      return Align(
+        alignment: Alignment.center,
+        child: Padding(
+          padding: const EdgeInsets.only(bottom: 12),
+          child: ClipRRect(
+            borderRadius: borderRadius,
+            child: BackdropFilter(
+              filter: ImageFilter.blur(sigmaX: 16, sigmaY: 16),
+              child: Container(
+                padding: padding,
+                decoration: BoxDecoration(
+                  color: background.withValues(alpha: 0.82),
+                  borderRadius: borderRadius,
+                  border: Border.all(color: border.withValues(alpha: 0.95)),
+                  boxShadow: [
+                    BoxShadow(
+                      color: border.withValues(alpha: 0.16),
+                      blurRadius: 18,
+                      offset: const Offset(0, 8),
+                    ),
+                  ],
+                ),
+                child: child,
+              ),
+            ),
+          ),
+        ),
+      );
+    }
+
+    Widget buildMemberSystemNotice({required bool isRemoval}) {
+      final tint = isRemoval
+          ? const Color(0xFFFEE2E2)
+          : const Color(0xFFDCFCE7);
+      final border = isRemoval
+          ? const Color(0xFFFCA5A5)
+          : const Color(0xFF86EFAC);
+      final textColor = isRemoval
+          ? const Color(0xFFB91C1C)
+          : const Color(0xFF15803D);
+      final icon = isRemoval
+          ? Icons.person_remove_alt_1
+          : Icons.person_add_alt_1;
+      return buildBlurNoticeShell(
+        background: tint,
+        border: border,
+        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+        borderRadius: BorderRadius.circular(18),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(icon, size: 16, color: textColor),
+            const SizedBox(width: 8),
+            Flexible(
+              child: Text(
+                text,
+                textAlign: TextAlign.center,
+                style: GoogleFonts.inter(
+                  color: textColor,
+                  fontSize: 12.5,
+                  fontWeight: FontWeight.w700,
+                ),
+              ),
+            ),
+          ],
+        ),
+      );
+    }
+
+    Widget buildMissionSystemNotice({
+      required String title,
+      required String instruction,
+      required String audience,
+      required String label,
+      required Color tint,
+      required Color border,
+      required Color accent,
+      required IconData icon,
+      String? progress,
+    }) {
+      return buildBlurNoticeShell(
+        background: tint,
+        border: border,
+        padding: const EdgeInsets.fromLTRB(14, 12, 14, 12),
+        borderRadius: BorderRadius.circular(22),
+        child: ConstrainedBox(
+          constraints: const BoxConstraints(maxWidth: 300),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.center,
+            children: [
+              Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Icon(icon, size: 15, color: accent),
+                  const SizedBox(width: 6),
+                  Flexible(
+                    child: Text(
+                      label,
+                      textAlign: TextAlign.center,
+                      style: GoogleFonts.inter(
+                        color: accent,
+                        fontSize: 12.5,
+                        fontWeight: FontWeight.w800,
+                      ),
+                    ),
+                  ),
+                  if ((progress ?? '').trim().isNotEmpty) ...[
+                    const SizedBox(width: 8),
+                    Container(
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 8,
+                        vertical: 3,
+                      ),
+                      decoration: BoxDecoration(
+                        color: accent.withValues(alpha: 0.12),
+                        borderRadius: BorderRadius.circular(999),
+                      ),
+                      child: Text(
+                        progress!,
+                        style: GoogleFonts.inter(
+                          color: accent,
+                          fontSize: 11,
+                          fontWeight: FontWeight.w800,
+                        ),
+                      ),
+                    ),
+                  ],
+                ],
+              ),
+              const SizedBox(height: 8),
+              Text(
+                title,
+                textAlign: TextAlign.center,
+                style: GoogleFonts.inter(
+                  color: const Color(0xFF0F172A),
+                  fontSize: 13.5,
+                  fontWeight: FontWeight.w800,
+                ),
+              ),
+              if (instruction.trim().isNotEmpty) ...[
+                const SizedBox(height: 5),
+                Text(
+                  instruction,
+                  textAlign: TextAlign.center,
+                  maxLines: 3,
+                  overflow: TextOverflow.ellipsis,
+                  style: GoogleFonts.inter(
+                    color: const Color(0xFF475569),
+                    fontSize: 11.5,
+                    fontWeight: FontWeight.w600,
+                    height: 1.35,
+                  ),
+                ),
+              ],
+              const SizedBox(height: 7),
+              Text(
+                'Pour: $audience',
+                textAlign: TextAlign.center,
+                style: GoogleFonts.inter(
+                  color: accent,
+                  fontSize: 11.5,
+                  fontWeight: FontWeight.w700,
+                ),
+              ),
+            ],
+          ),
+        ),
+      );
+    }
+
+    if (event == 'member_added' ||
+        event == 'member_removed' ||
+        _looksLikeMemberSystemText(normalizedText)) {
+      return buildMemberSystemNotice(
+        isRemoval:
+            event == 'member_removed' ||
+            normalizedText.contains('retire') ||
+            normalizedText.contains('retir'),
+      );
+    }
+
+    if (event.startsWith('mission_') ||
+        _looksLikeMissionSystemText(normalizedText)) {
+      final title = (metadata['title'] as String?)?.trim().isNotEmpty == true
+          ? (metadata['title'] as String).trim()
+          : text.replaceFirst(RegExp(r'^[^:]+:\s*'), '').trim();
+      final instruction = (metadata['instruction'] as String?)?.trim() ?? '';
+      final audience = resolveMissionAudience();
+      final progress = (metadata['progressLabel'] as String?)?.trim();
+
+      if (event == 'mission_removed' ||
+          normalizedText.startsWith('mission supprimee')) {
+        return buildMissionSystemNotice(
+          title: title,
+          instruction: instruction,
+          audience: audience,
+          label: 'Mission supprimée',
+          tint: const Color(0xFFFEE2E2),
+          border: const Color(0xFFFCA5A5),
+          accent: const Color(0xFFDC2626),
+          icon: Icons.delete_outline,
+        );
+      }
+
+      if (event == 'mission_completed' ||
+          normalizedText.startsWith('mission terminee')) {
+        return buildMissionSystemNotice(
+          title: title,
+          instruction: instruction,
+          audience: audience,
+          label: 'Mission terminée',
+          tint: const Color(0xFFDCFCE7),
+          border: const Color(0xFF86EFAC),
+          accent: const Color(0xFF15803D),
+          icon: Icons.task_alt,
+          progress: progress,
+        );
+      }
+
+      if (event == 'mission_progress' ||
+          normalizedText.startsWith('progression mission')) {
+        return buildMissionSystemNotice(
+          title: title,
+          instruction: instruction,
+          audience: audience,
+          label: 'Progression mission',
+          tint: const Color(0xFFDBEAFE),
+          border: const Color(0xFF93C5FD),
+          accent: const Color(0xFF1D4ED8),
+          icon: Icons.flag_outlined,
+          progress: progress,
+        );
+      }
+
+      return buildMissionSystemNotice(
+        title: title,
+        instruction: instruction,
+        audience: audience,
+        label: 'Nouvelle mission',
+        tint: const Color(0xFFDCFCE7),
+        border: const Color(0xFF86EFAC),
+        accent: const Color(0xFF15803D),
+        icon: Icons.campaign_outlined,
+        progress: progress,
+      );
+    }
+
+    return buildBlurNoticeShell(
+      background: const Color(0xFFDBEAFE),
+      border: const Color(0xFF93C5FD),
+      borderRadius: BorderRadius.circular(999),
+      child: Text(
+        text,
+        textAlign: TextAlign.center,
+        style: GoogleFonts.inter(
+          color: const Color(0xFF1D4ED8),
+          fontSize: 12.5,
+          fontWeight: FontWeight.w700,
+        ),
+      ),
+    );
+  }
+
+  Widget _buildMissionStrip() {
+    if (_activeMissions.isEmpty) return const SizedBox.shrink();
+    final activeCount = _activeMissions
+        .where((task) => task.status != 'completed' && !task.isFullyCompleted)
+        .length;
+
+    if (_isMissionStripMinimized) {
+      return Padding(
+        padding: const EdgeInsets.fromLTRB(14, 0, 14, 6),
+        child: GestureDetector(
+          onTap: () => setState(() => _isMissionStripMinimized = false),
+          child: Container(
+            height: 42,
+            padding: const EdgeInsets.symmetric(horizontal: 14),
+            decoration: BoxDecoration(
+              gradient: const LinearGradient(
+                colors: [Color(0xFF0F63FF), Color(0xFF2563EB)],
+                begin: Alignment.centerLeft,
+                end: Alignment.centerRight,
+              ),
+              borderRadius: BorderRadius.circular(999),
+              boxShadow: const [
+                BoxShadow(
+                  color: Color(0x330F63FF),
+                  blurRadius: 14,
+                  offset: Offset(0, 6),
+                ),
+              ],
+            ),
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                const Icon(Icons.flag_outlined, color: Colors.white, size: 15),
+                const SizedBox(width: 6),
+                Text(
+                  '${activeCount == 0 ? _activeMissions.length : activeCount} mission(s) active(s)',
+                  style: const TextStyle(
+                    color: Colors.white,
+                    fontSize: 13,
+                    fontWeight: FontWeight.w700,
+                  ),
+                ),
+                const SizedBox(width: 8),
+                const Icon(
+                  Icons.keyboard_arrow_down,
+                  color: Colors.white,
+                  size: 18,
+                ),
+              ],
+            ),
+          ),
+        ),
+      );
+    }
+
+    return Container(
+      decoration: const BoxDecoration(
+        gradient: LinearGradient(
+          colors: [Color(0xFFF5F9FF), Color(0xFFFFFFFF)],
+          begin: Alignment.topCenter,
+          end: Alignment.bottomCenter,
+        ),
+      ),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Container(
+            margin: const EdgeInsets.fromLTRB(12, 8, 12, 0),
+            padding: const EdgeInsets.fromLTRB(14, 10, 10, 10),
+            decoration: BoxDecoration(
+              color: const Color(0xFFEFF6FF),
+              borderRadius: BorderRadius.circular(22),
+              border: Border.all(color: const Color(0xFFD7E4FF)),
+            ),
+            child: Row(
+              children: [
+                const Icon(
+                  Icons.flag_outlined,
+                  color: Color(0xFF0F63FF),
+                  size: 16,
+                ),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: Text(
+                    'Missions actives',
+                    style: GoogleFonts.inter(
+                      fontSize: 13,
+                      fontWeight: FontWeight.w800,
+                      color: const Color(0xFF0F63FF),
+                    ),
+                  ),
+                ),
+                Container(
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 10,
+                    vertical: 5,
+                  ),
+                  decoration: BoxDecoration(
+                    color: const Color(0xFF0F63FF),
+                    borderRadius: BorderRadius.circular(999),
+                  ),
+                  child: Text(
+                    '${activeCount == 0 ? _activeMissions.length : activeCount}',
+                    style: const TextStyle(
+                      color: Colors.white,
+                      fontSize: 11.5,
+                      fontWeight: FontWeight.w800,
+                    ),
+                  ),
+                ),
+                const SizedBox(width: 8),
+                GestureDetector(
+                  onTap: () => setState(() => _isMissionStripMinimized = true),
+                  child: Container(
+                    width: 32,
+                    height: 32,
+                    decoration: const BoxDecoration(
+                      color: Colors.white,
+                      shape: BoxShape.circle,
+                    ),
+                    child: const Icon(
+                      Icons.keyboard_arrow_down,
+                      color: Color(0xFF64748B),
+                      size: 18,
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+          SizedBox(
+            height: 172,
+            child: ListView.separated(
+              scrollDirection: Axis.horizontal,
+              padding: const EdgeInsets.fromLTRB(14, 0, 14, 10),
+              itemCount: _activeMissions.length,
+              separatorBuilder: (_, i) => const SizedBox(width: 10),
+              itemBuilder: (_, i) => _buildMissionCard(_activeMissions[i]),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildMissionCard(TaskModel task) {
+    final isAccepted = task.status == 'accepted';
+    final isCompleted = task.isFullyCompleted || task.status == 'completed';
+    final hasAssignments = task.assigneeCount > 0;
+    final assignedNames =
+        (task.assignedMemberIds.isNotEmpty
+                ? task.assignedMemberIds
+                : <String>[
+                    if ((task.assignedToId ?? '').trim().isNotEmpty)
+                      task.assignedToId!.trim(),
+                  ])
+            .map((id) {
+              if (task.assignedMemberNames[id]?.trim().isNotEmpty == true) {
+                return task.assignedMemberNames[id]!.trim();
+              }
+              if ((task.assignedToId ?? '').trim() == id &&
+                  (task.assignedToName ?? '').trim().isNotEmpty) {
+                return task.assignedToName!.trim();
+              }
+              return id;
+            })
+            .toList();
+    final assignedLabel = assignedNames.isEmpty
+        ? 'Tout le monde'
+        : assignedNames.length == 1
+        ? assignedNames.first
+        : assignedNames.length == 2
+        ? '${assignedNames.first} et ${assignedNames.last}'
+        : '${assignedNames.take(assignedNames.length - 1).join(', ')} et ${assignedNames.last}';
+
+    return Container(
+      width: 274,
+      padding: const EdgeInsets.all(14),
+      decoration: BoxDecoration(
+        gradient: LinearGradient(
+          colors: isCompleted
+              ? const [Color(0xFFEFFDF5), Color(0xFFF8FFFB)]
+              : const [Color(0xFFEFF6FF), Color(0xFFF8FBFF)],
+          begin: Alignment.topLeft,
+          end: Alignment.bottomRight,
+        ),
+        borderRadius: BorderRadius.circular(22),
+        border: Border.all(
+          color: isCompleted
+              ? const Color(0xFF86EFAC)
+              : const Color(0xFFBFDBFE),
+          width: 1.2,
+        ),
+        boxShadow: const [
+          BoxShadow(
+            color: Color(0x1A0F63FF),
+            blurRadius: 18,
+            offset: Offset(0, 8),
+          ),
+        ],
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Expanded(
+                child: Text(
+                  task.title,
+                  style: GoogleFonts.inter(
+                    fontSize: 14,
+                    fontWeight: FontWeight.w800,
+                    color: const Color(0xFF0F172A),
+                  ),
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                ),
+              ),
+              if (isCompleted)
+                Container(
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 8,
+                    vertical: 4,
+                  ),
+                  decoration: BoxDecoration(
+                    color: const Color(0xFF22C55E),
+                    borderRadius: BorderRadius.circular(999),
+                  ),
+                  child: const Text(
+                    'Terminee',
+                    style: TextStyle(
+                      color: Colors.white,
+                      fontSize: 10,
+                      fontWeight: FontWeight.w800,
+                    ),
+                  ),
+                )
+              else if (isAccepted)
+                Container(
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 8,
+                    vertical: 4,
+                  ),
+                  decoration: BoxDecoration(
+                    color: const Color(0xFFDBEAFE),
+                    borderRadius: BorderRadius.circular(999),
+                  ),
+                  child: const Text(
+                    'En cours',
+                    style: TextStyle(
+                      color: Color(0xFF1D4ED8),
+                      fontSize: 10,
+                      fontWeight: FontWeight.w800,
+                    ),
+                  ),
+                ),
+            ],
+          ),
+          const SizedBox(height: 8),
+          if (hasAssignments) ...[
+            Container(
+              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+              decoration: BoxDecoration(
+                color: const Color(0xFF0F63FF),
+                borderRadius: BorderRadius.circular(999),
+              ),
+              child: Text(
+                'Progression ${task.progressLabel}',
+                style: GoogleFonts.inter(
+                  fontSize: 11,
+                  color: Colors.white,
+                  fontWeight: FontWeight.w800,
+                ),
+              ),
+            ),
+            const SizedBox(height: 8),
+            Text(
+              'Pour $assignedLabel',
+              style: GoogleFonts.inter(
+                fontSize: 12,
+                color: const Color(0xFF1D4ED8),
+                fontWeight: FontWeight.w700,
+              ),
+            ),
+            const SizedBox(height: 8),
+          ],
+          Expanded(
+            child: Text(
+              task.instruction,
+              style: GoogleFonts.inter(
+                fontSize: 12,
+                color: const Color(0xFF334155),
+                height: 1.35,
+                fontWeight: FontWeight.w500,
+              ),
+              maxLines: 4,
+              overflow: TextOverflow.ellipsis,
+            ),
+          ),
+          const SizedBox(height: 10),
+          Row(
+            children: [
+              if (_canAcceptTask(task))
+                _MissionActionButton(
+                  label: 'Accepter',
+                  filled: false,
+                  onTap: () async {
+                    final user = FirebaseAuth.instance.currentUser;
+                    if (user == null) return;
+                    await _taskService.acceptTask(
+                      widget.conversationId,
+                      task.id,
+                      user.uid,
+                      user.displayName ?? '',
+                    );
+                  },
+                ),
+              if (_canCompleteTask(task))
+                _MissionActionButton(
+                  label: 'Terminer',
+                  filled: true,
+                  onTap: () {
+                    final currentUser = FirebaseAuth.instance.currentUser;
+                    if (currentUser == null) return;
+                    _taskService.completeTask(
+                      widget.conversationId,
+                      task.id,
+                      uid: currentUser.uid,
+                      userName: currentUser.displayName ?? '',
+                    );
+                  },
+                ),
+              const Spacer(),
+              if (_canCreateMission)
+                GestureDetector(
+                  onTap: () =>
+                      _taskService.deleteTask(widget.conversationId, task.id),
+                  child: const Icon(
+                    Icons.delete_outline,
+                    size: 16,
+                    color: Color(0xFFEF4444),
+                  ),
+                ),
+            ],
+          ),
+        ],
+      ),
+    );
   }
 
   @override
@@ -1061,9 +2584,8 @@ class _WorkerChatThreadScreenState extends State<WorkerChatThreadScreen> {
 
                         // Merge older paginated docs with live stream docs
                         final seenIds = <String>{};
-                        final allDocs = <QueryDocumentSnapshot<
-                          Map<String, dynamic>
-                        >>[];
+                        final allDocs =
+                            <QueryDocumentSnapshot<Map<String, dynamic>>>[];
                         for (final d in [..._olderMessages, ...streamDocs]) {
                           if (seenIds.add(d.id)) allDocs.add(d);
                         }
@@ -1127,7 +2649,11 @@ class _WorkerChatThreadScreenState extends State<WorkerChatThreadScreen> {
                             16,
                             bannerVisible ? 190 : 150,
                             16,
-                            118,
+                            _activeMissions.isEmpty
+                                ? 118
+                                : _isMissionStripMinimized
+                                ? 168
+                                : 258,
                           ),
                           itemCount: totalCount,
                           itemBuilder: (context, index) {
@@ -1267,56 +2793,64 @@ class _WorkerChatThreadScreenState extends State<WorkerChatThreadScreen> {
                 left: 0,
                 right: 0,
                 bottom: 0,
-                child: _ThreadComposer(
-                  controller: _controller,
-                  isSending: _isSending,
-                  isRecording: _isRecording,
-                  isRecordLocked: _isRecordLocked,
-                  isRecordPaused: _isRecordPaused,
-                  showRecordComposer: _showRecordComposer,
-                  recordingElapsed: _recordingElapsed,
-                  recordingWaveform: _recordingWaveform,
-                  holdDx: _holdDx,
-                  holdDy: _holdDy,
-                  onChanged: _handleComposerChanged,
-                  onAttachTap: _openAttachmentPicker,
-                  onCameraTap: () => _pickAndSendImage(ImageSource.camera),
-                  onCameraLongPress: _startVideoRecording,
-                  onCameraLongPressEnd: (_) => _stopVideoRecording(),
-                  onSendTap: _sendText,
-                  onMicTap: _toggleRecording,
-                  onMicPressStart: () =>
-                      _startRecording(locked: false, fromHold: true),
-                  onMicPressMove: (dx, dy) async {
-                    if (!_isRecording || _isRecordLocked) return;
-                    setState(() {
-                      _holdDx = dx;
-                      _holdDy = dy;
-                    });
-                    if (dx < -110) {
-                      _recordCanceledByGesture = true;
-                      await _cancelRecording();
-                    } else if (dy < -80) {
-                      setState(() {
-                        _isRecordLocked = true;
-                        _holdDx = 0;
-                        _holdDy = 0;
-                      });
-                    }
-                  },
-                  onMicPressEnd: () async {
-                    if (!_isRecording) return;
-                    if (_recordCanceledByGesture) {
-                      _recordCanceledByGesture = false;
-                      return;
-                    }
-                    if (!_isRecordLocked) {
-                      await _stopAndSendRecording();
-                    }
-                  },
-                  onRecordDelete: _cancelRecording,
-                  onRecordPauseResume: _pauseResumeRecording,
-                  onRecordSend: _stopAndSendRecording,
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    _buildMissionStrip(),
+                    _ThreadComposer(
+                      controller: _controller,
+                      isSending: _isSending,
+                      isRecording: _isRecording,
+                      isRecordLocked: _isRecordLocked,
+                      isRecordPaused: _isRecordPaused,
+                      showRecordComposer: _showRecordComposer,
+                      recordingElapsed: _recordingElapsed,
+                      recordingWaveform: _recordingWaveform,
+                      holdDx: _holdDx,
+                      holdDy: _holdDy,
+                      onChanged: _handleComposerChanged,
+                      showMissionAction: _canCreateMission,
+                      onMissionTap: _showCreateMissionSheet,
+                      onAttachTap: _openAttachmentPicker,
+                      onCameraTap: () => _pickAndSendImage(ImageSource.camera),
+                      onCameraLongPress: _startVideoRecording,
+                      onCameraLongPressEnd: (_) {},
+                      onSendTap: _sendText,
+                      onMicTap: _toggleRecording,
+                      onMicPressStart: () =>
+                          _startRecording(locked: false, fromHold: true),
+                      onMicPressMove: (dx, dy) async {
+                        if (!_isRecording || _isRecordLocked) return;
+                        setState(() {
+                          _holdDx = dx;
+                          _holdDy = dy;
+                        });
+                        if (dx < -110) {
+                          _recordCanceledByGesture = true;
+                          await _cancelRecording();
+                        } else if (dy < -80) {
+                          setState(() {
+                            _isRecordLocked = true;
+                            _holdDx = 0;
+                            _holdDy = 0;
+                          });
+                        }
+                      },
+                      onMicPressEnd: () async {
+                        if (!_isRecording) return;
+                        if (_recordCanceledByGesture) {
+                          _recordCanceledByGesture = false;
+                          return;
+                        }
+                        if (!_isRecordLocked) {
+                          await _stopAndSendRecording();
+                        }
+                      },
+                      onRecordDelete: _cancelRecording,
+                      onRecordPauseResume: _pauseResumeRecording,
+                      onRecordSend: _stopAndSendRecording,
+                    ),
+                  ],
                 ),
               ),
               // Camera video recording overlay
@@ -1348,7 +2882,7 @@ class _WorkerChatThreadScreenState extends State<WorkerChatThreadScreen> {
                             ),
                             const SizedBox(height: 12),
                             const Text(
-                              'Relâchez pour envoyer',
+                              'Envoi automatique après 15 secondes',
                               style: TextStyle(
                                 color: Colors.white,
                                 fontSize: 14,
@@ -1361,18 +2895,7 @@ class _WorkerChatThreadScreenState extends State<WorkerChatThreadScreen> {
                         top: 50,
                         right: 20,
                         child: GestureDetector(
-                          onTap: () async {
-                            _recordingVideoTimer?.cancel();
-                            final ctrl = _cameraController;
-                            setState(() {
-                              _isRecordingVideo = false;
-                              _cameraController = null;
-                            });
-                            try {
-                              await ctrl?.stopVideoRecording();
-                            } catch (_) {}
-                            await ctrl?.dispose();
-                          },
+                          onTap: _cancelVideoRecording,
                           child: Container(
                             padding: const EdgeInsets.all(8),
                             decoration: const BoxDecoration(
@@ -1695,6 +3218,11 @@ class _MessageBubble extends StatefulWidget {
   const _MessageBubble({
     super.key,
     required this.senderName,
+    required this.senderRoleLabel,
+    required this.senderPhotoUrl,
+    required this.senderPhotoBase64,
+    required this.showSenderIdentity,
+    required this.showStayFixBadge,
     required this.messageId,
     required this.conversationId,
     required this.isMine,
@@ -1724,6 +3252,11 @@ class _MessageBubble extends StatefulWidget {
   });
 
   final String senderName;
+  final String senderRoleLabel;
+  final String? senderPhotoUrl;
+  final String? senderPhotoBase64;
+  final bool showSenderIdentity;
+  final bool showStayFixBadge;
   final String messageId;
   final String conversationId;
   final bool isMine;
@@ -1975,9 +3508,16 @@ class _MessageBubbleState extends State<_MessageBubble> {
   @override
   Widget build(BuildContext context) {
     Uint8List? imageBytes;
+    Uint8List? senderPhotoBytes;
     if (widget.imageBase64 != null && widget.imageBase64!.isNotEmpty) {
       try {
         imageBytes = base64Decode(widget.imageBase64!);
+      } catch (_) {}
+    }
+    if (widget.senderPhotoBase64 != null &&
+        widget.senderPhotoBase64!.isNotEmpty) {
+      try {
+        senderPhotoBytes = base64Decode(widget.senderPhotoBase64!);
       } catch (_) {}
     }
 
@@ -2013,77 +3553,268 @@ class _MessageBubbleState extends State<_MessageBubble> {
           margin: const EdgeInsets.only(bottom: 12),
           child: IntrinsicWidth(
             child: ConstrainedBox(
-            constraints: BoxConstraints(
-              maxWidth: MediaQuery.of(context).size.width * 0.75,
-              minWidth: 0,
-            ),
-            child: Stack(
-              clipBehavior: Clip.none,
-              children: [
-                Padding(
-                  padding: EdgeInsets.only(
-                    top: reaction != null && reaction.isNotEmpty ? 10 : 0,
-                  ),
-                  child: Column(
-                    mainAxisSize: MainAxisSize.min,
-                    crossAxisAlignment: widget.isMine
-                        ? CrossAxisAlignment.end
-                        : CrossAxisAlignment.start,
-                    children: [
-                      // Video message
-                      if (hasVideo) ...[
-                        GestureDetector(
-                          onTap: widget.isSelectMode
-                              ? null
-                              : () {
-                                  Navigator.push(
-                                    context,
-                                    MaterialPageRoute(
-                                      builder: (_) => _VideoPlayerPage(
-                                        url: widget.videoUrl!,
-                                      ),
-                                    ),
-                                  );
-                                },
-                          child: Container(
-                            width: 200,
-                            height: 150,
-                            decoration: BoxDecoration(
-                              color: Colors.black,
-                              borderRadius: BorderRadius.circular(16),
-                            ),
-                            child: Stack(
-                              alignment: Alignment.center,
+              constraints: BoxConstraints(
+                maxWidth: MediaQuery.of(context).size.width * 0.75,
+                minWidth: 0,
+              ),
+              child: Stack(
+                clipBehavior: Clip.none,
+                children: [
+                  Padding(
+                    padding: EdgeInsets.only(
+                      top: reaction != null && reaction.isNotEmpty ? 10 : 0,
+                    ),
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      crossAxisAlignment: widget.isMine
+                          ? CrossAxisAlignment.end
+                          : CrossAxisAlignment.start,
+                      children: [
+                        if (widget.showSenderIdentity) ...[
+                          Padding(
+                            padding: const EdgeInsets.only(left: 4, bottom: 6),
+                            child: Row(
+                              mainAxisSize: MainAxisSize.min,
                               children: [
-                                ClipRRect(
-                                  borderRadius: BorderRadius.circular(16),
-                                  child: Container(
-                                    color: const Color(0xFF1A1A2E),
-                                  ),
+                                CircleAvatar(
+                                  radius: 14,
+                                  backgroundColor: const Color(0xFFEFF6FF),
+                                  backgroundImage:
+                                      widget.senderPhotoUrl?.isNotEmpty == true
+                                      ? NetworkImage(widget.senderPhotoUrl!)
+                                      : senderPhotoBytes != null
+                                      ? MemoryImage(senderPhotoBytes)
+                                      : null,
+                                  child:
+                                      widget.senderPhotoUrl?.isNotEmpty ==
+                                              true ||
+                                          senderPhotoBytes != null
+                                      ? null
+                                      : Text(
+                                          widget.senderName.isNotEmpty
+                                              ? widget.senderName[0]
+                                                    .toUpperCase()
+                                              : '?',
+                                          style: GoogleFonts.inter(
+                                            color: _kAccent,
+                                            fontSize: 12,
+                                            fontWeight: FontWeight.w800,
+                                          ),
+                                        ),
                                 ),
-                                const Icon(
-                                  Icons.play_circle_fill,
-                                  color: Colors.white,
-                                  size: 48,
-                                ),
-                                Positioned(
-                                  bottom: 8,
-                                  right: 8,
-                                  child: Text(
-                                    _formatVideoDuration(
-                                      widget.videoDurationMs ?? 0,
-                                    ),
-                                    style: const TextStyle(
-                                      color: Colors.white,
-                                      fontSize: 11,
-                                    ),
+                                const SizedBox(width: 8),
+                                Flexible(
+                                  child: Row(
+                                    mainAxisSize: MainAxisSize.min,
+                                    children: [
+                                      Flexible(
+                                        child: Text(
+                                          widget.senderName,
+                                          maxLines: 1,
+                                          overflow: TextOverflow.ellipsis,
+                                          style: GoogleFonts.inter(
+                                            color: kMessagesText,
+                                            fontSize: 12.5,
+                                            fontWeight: FontWeight.w700,
+                                          ),
+                                        ),
+                                      ),
+                                      if (widget.showStayFixBadge) ...[
+                                        const SizedBox(width: 6),
+                                        Container(
+                                          padding: const EdgeInsets.symmetric(
+                                            horizontal: 8,
+                                            vertical: 3,
+                                          ),
+                                          decoration: BoxDecoration(
+                                            color: const Color(0xFFFFF4D6),
+                                            borderRadius: BorderRadius.circular(
+                                              999,
+                                            ),
+                                            border: Border.all(
+                                              color: const Color(0xFFF5D977),
+                                            ),
+                                          ),
+                                          child: Text(
+                                            widget.senderRoleLabel.isNotEmpty
+                                                ? widget.senderRoleLabel
+                                                : 'Concierge',
+                                            style: GoogleFonts.inter(
+                                              color: const Color(0xFF9A6C00),
+                                              fontSize: 10.5,
+                                              fontWeight: FontWeight.w800,
+                                            ),
+                                          ),
+                                        ),
+                                      ],
+                                    ],
                                   ),
                                 ),
                               ],
                             ),
                           ),
-                        ),
-                        if (videoOnly)
+                        ],
+                        // Video message
+                        if (hasVideo) ...[
+                          GestureDetector(
+                            onTap: widget.isSelectMode
+                                ? null
+                                : () {
+                                    Navigator.push(
+                                      context,
+                                      MaterialPageRoute(
+                                        builder: (_) => _VideoPlayerPage(
+                                          url: widget.videoUrl!,
+                                        ),
+                                      ),
+                                    );
+                                  },
+                            child: Container(
+                              width: 200,
+                              height: 150,
+                              decoration: BoxDecoration(
+                                color: Colors.black,
+                                borderRadius: BorderRadius.circular(16),
+                              ),
+                              child: Stack(
+                                alignment: Alignment.center,
+                                children: [
+                                  ClipRRect(
+                                    borderRadius: BorderRadius.circular(16),
+                                    child: Container(
+                                      color: const Color(0xFF1A1A2E),
+                                    ),
+                                  ),
+                                  const Icon(
+                                    Icons.play_circle_fill,
+                                    color: Colors.white,
+                                    size: 48,
+                                  ),
+                                  Positioned(
+                                    bottom: 8,
+                                    right: 8,
+                                    child: Text(
+                                      _formatVideoDuration(
+                                        widget.videoDurationMs ?? 0,
+                                      ),
+                                      style: const TextStyle(
+                                        color: Colors.white,
+                                        fontSize: 11,
+                                      ),
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            ),
+                          ),
+                          if (videoOnly)
+                            _MessageStatusOverlay(
+                              isMine: widget.isMine,
+                              createdAt: widget.createdAt,
+                              isSeenByOther: isSeenByOther,
+                              isDeliveredToOther: isDeliveredToOther,
+                            ),
+                        ],
+                        if (hasImage && !hasVideo) ...[
+                          _MessageImage(
+                            imageUrl: widget.imageUrl,
+                            imageBytes: imageBytes,
+                            isMine: widget.isMine,
+                            createdAt: widget.createdAt,
+                            onOpen: () => _openImagePreview(imageBytes),
+                          ),
+                          if (hasText || hasAudio || hasAddress)
+                            const SizedBox(height: 6),
+                        ],
+                        if (!hasVideo && (hasText || hasAudio || hasAddress))
+                          _BubbleShell(
+                            isMine: widget.isMine,
+                            color: bubbleColor,
+                            borderColor: widget.isMine
+                                ? _kAccent.withValues(alpha: 0.60)
+                                : Colors.white.withValues(alpha: 0.08),
+                            padding: const EdgeInsets.fromLTRB(14, 12, 14, 10),
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                if (hasAddress)
+                                  _AddressCard(
+                                    widget: widget,
+                                    foreground: foreground,
+                                  ),
+                                if (hasAddress &&
+                                    (hasImage || hasText || hasAudio))
+                                  const SizedBox(height: 10),
+                                if (hasAudio)
+                                  _AudioBubbleRow(
+                                    isMine: widget.isMine,
+                                    foreground: foreground,
+                                    isPlaying: _isPlaying,
+                                    isPreparing: _isPreparingAudio,
+                                    durationMs: widget.audioDurationMs,
+                                    waveform: widget.audioWaveform,
+                                    progressMs: _position.inMilliseconds,
+                                    activeDurationMs:
+                                        _duration.inMilliseconds > 0
+                                        ? _duration.inMilliseconds
+                                        : widget.audioDurationMs,
+                                    onTap: widget.isSelectMode
+                                        ? null
+                                        : _toggleAudio,
+                                    onSeek: widget.isSelectMode
+                                        ? null
+                                        : _seekAudio,
+                                  ),
+                                if (hasAudio && hasText)
+                                  const SizedBox(height: 8),
+                                if (hasText)
+                                  Text(
+                                    widget.text,
+                                    style: GoogleFonts.inter(
+                                      color: foreground,
+                                      fontSize: 14,
+                                      height: 1.35,
+                                    ),
+                                  ),
+                                const SizedBox(height: 6),
+                                Align(
+                                  alignment: Alignment.bottomRight,
+                                  child: Row(
+                                    mainAxisSize: MainAxisSize.min,
+                                    children: [
+                                      Text(
+                                        _formatTime(widget.createdAt),
+                                        style: GoogleFonts.inter(
+                                          color: foreground.withValues(
+                                            alpha: 0.70,
+                                          ),
+                                          fontSize: 11,
+                                          fontWeight: FontWeight.w500,
+                                        ),
+                                      ),
+                                      if (widget.isMine) ...[
+                                        const SizedBox(width: 4),
+                                        Icon(
+                                          isSeenByOther
+                                              ? Icons.done_all_rounded
+                                              : isDeliveredToOther
+                                              ? Icons.done_all_rounded
+                                              : Icons.done_rounded,
+                                          size: 15,
+                                          color: isSeenByOther
+                                              ? const Color(0xFF8FD3FF)
+                                              : foreground.withValues(
+                                                  alpha: 0.72,
+                                                ),
+                                        ),
+                                      ],
+                                    ],
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
+                        if (imageOnly)
                           _MessageStatusOverlay(
                             isMine: widget.isMine,
                             createdAt: widget.createdAt,
@@ -2091,136 +3822,34 @@ class _MessageBubbleState extends State<_MessageBubble> {
                             isDeliveredToOther: isDeliveredToOther,
                           ),
                       ],
-                      if (hasImage && !hasVideo) ...[
-                        _MessageImage(
-                          imageUrl: widget.imageUrl,
-                          imageBytes: imageBytes,
-                          isMine: widget.isMine,
-                          createdAt: widget.createdAt,
-                          onOpen: () => _openImagePreview(imageBytes),
-                        ),
-                        if (hasText || hasAudio || hasAddress)
-                          const SizedBox(height: 6),
-                      ],
-                      if (!hasVideo && (hasText || hasAudio || hasAddress))
-                        _BubbleShell(
-                          isMine: widget.isMine,
-                          color: bubbleColor,
-                          borderColor: widget.isMine
-                              ? _kAccent.withValues(alpha: 0.60)
-                              : Colors.white.withValues(alpha: 0.08),
-                          padding: const EdgeInsets.fromLTRB(14, 12, 14, 10),
-                          child: Column(
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            children: [
-                              if (hasAddress)
-                                _AddressCard(
-                                  widget: widget,
-                                  foreground: foreground,
-                                ),
-                              if (hasAddress &&
-                                  (hasImage || hasText || hasAudio))
-                                const SizedBox(height: 10),
-                              if (hasAudio)
-                                _AudioBubbleRow(
-                                  isMine: widget.isMine,
-                                  foreground: foreground,
-                                  isPlaying: _isPlaying,
-                                  isPreparing: _isPreparingAudio,
-                                  durationMs: widget.audioDurationMs,
-                                  waveform: widget.audioWaveform,
-                                  progressMs: _position.inMilliseconds,
-                                  activeDurationMs: _duration.inMilliseconds > 0
-                                      ? _duration.inMilliseconds
-                                      : widget.audioDurationMs,
-                                  onTap: widget.isSelectMode ? null : _toggleAudio,
-                                  onSeek: widget.isSelectMode ? null : _seekAudio,
-                                ),
-                              if (hasAudio && hasText)
-                                const SizedBox(height: 8),
-                              if (hasText)
-                                Text(
-                                  widget.text,
-                                  style: GoogleFonts.inter(
-                                    color: foreground,
-                                    fontSize: 14,
-                                    height: 1.35,
-                                  ),
-                                ),
-                              const SizedBox(height: 6),
-                              Align(
-                                alignment: Alignment.bottomRight,
-                                child: Row(
-                                  mainAxisSize: MainAxisSize.min,
-                                  children: [
-                                    Text(
-                                      _formatTime(widget.createdAt),
-                                      style: GoogleFonts.inter(
-                                        color: foreground.withValues(
-                                          alpha: 0.70,
-                                        ),
-                                        fontSize: 11,
-                                        fontWeight: FontWeight.w500,
-                                      ),
-                                    ),
-                                    if (widget.isMine) ...[
-                                      const SizedBox(width: 4),
-                                      Icon(
-                                        isSeenByOther
-                                            ? Icons.done_all_rounded
-                                            : isDeliveredToOther
-                                            ? Icons.done_all_rounded
-                                            : Icons.done_rounded,
-                                        size: 15,
-                                        color: isSeenByOther
-                                            ? const Color(0xFF8FD3FF)
-                                            : foreground.withValues(
-                                                alpha: 0.72,
-                                              ),
-                                      ),
-                                    ],
-                                  ],
-                                ),
-                              ),
-                            ],
-                          ),
-                        ),
-                      if (imageOnly)
-                        _MessageStatusOverlay(
-                          isMine: widget.isMine,
-                          createdAt: widget.createdAt,
-                          isSeenByOther: isSeenByOther,
-                          isDeliveredToOther: isDeliveredToOther,
-                        ),
-                    ],
-                  ),
-                ),
-                if (reaction != null && reaction.isNotEmpty)
-                  Positioned(
-                    top: 0,
-                    right: widget.isMine ? 12 : null,
-                    left: widget.isMine ? null : 12,
-                    child: StayFixReactionBadge(
-                      reaction: reaction,
-                      highlighted: _showReactionPop && reaction == 'heart',
                     ),
                   ),
-                if (_showReactionPop)
-                  Positioned(
-                    top: 18,
-                    right: widget.isMine ? -10 : null,
-                    left: widget.isMine ? null : -10,
-                    child: IgnorePointer(
-                      child: AnimatedScale(
-                        scale: _showReactionPop ? 1 : 0.6,
-                        duration: const Duration(milliseconds: 180),
-                        child: const _StayFixHeartBurst(),
+                  if (reaction != null && reaction.isNotEmpty)
+                    Positioned(
+                      top: 0,
+                      right: widget.isMine ? 12 : null,
+                      left: widget.isMine ? null : 12,
+                      child: StayFixReactionBadge(
+                        reaction: reaction,
+                        highlighted: _showReactionPop && reaction == 'heart',
                       ),
                     ),
-                  ),
-              ],
+                  if (_showReactionPop)
+                    Positioned(
+                      top: 18,
+                      right: widget.isMine ? -10 : null,
+                      left: widget.isMine ? null : -10,
+                      child: IgnorePointer(
+                        child: AnimatedScale(
+                          scale: _showReactionPop ? 1 : 0.6,
+                          duration: const Duration(milliseconds: 180),
+                          child: const _StayFixHeartBurst(),
+                        ),
+                      ),
+                    ),
+                ],
+              ),
             ),
-          ),
           ),
         ),
       ),
@@ -2381,7 +4010,11 @@ class _AddressCard extends StatelessWidget {
                 const SizedBox(height: 6),
                 Row(
                   children: [
-                    Icon(LucideIcons.externalLink, size: 12, color: kMessagesBlue),
+                    Icon(
+                      LucideIcons.externalLink,
+                      size: 12,
+                      color: kMessagesBlue,
+                    ),
                     const SizedBox(width: 4),
                     Text(
                       'Ouvrir dans Maps',
@@ -2998,6 +4631,8 @@ class _ThreadComposer extends StatefulWidget {
     required this.holdDx,
     required this.holdDy,
     required this.onChanged,
+    required this.showMissionAction,
+    required this.onMissionTap,
     required this.onAttachTap,
     required this.onCameraTap,
     required this.onCameraLongPress,
@@ -3023,6 +4658,8 @@ class _ThreadComposer extends StatefulWidget {
   final double holdDx;
   final double holdDy;
   final VoidCallback onChanged;
+  final bool showMissionAction;
+  final VoidCallback onMissionTap;
   final VoidCallback onAttachTap;
   final VoidCallback onCameraTap;
   final VoidCallback onCameraLongPress;
@@ -3243,6 +4880,17 @@ class _ThreadComposerState extends State<_ThreadComposer> {
                           key: const ValueKey('composer'),
                           crossAxisAlignment: CrossAxisAlignment.center,
                           children: [
+                            if (widget.showMissionAction)
+                              IconButton(
+                                onPressed: widget.isSending
+                                    ? null
+                                    : widget.onMissionTap,
+                                icon: Icon(
+                                  LucideIcons.flag,
+                                  color: _kAccent,
+                                  size: 20,
+                                ),
+                              ),
                             IconButton(
                               onPressed: widget.isSending
                                   ? null
@@ -3361,12 +5009,17 @@ class _ThreadComposerState extends State<_ThreadComposer> {
                   decoration: BoxDecoration(
                     color: widget.isRecording
                         ? const Color(0xFFFF6678)
+                        : (widget.showRecordComposer || hasText)
+                        ? _kSendGreen
                         : _kAccent,
                     shape: BoxShape.circle,
                     boxShadow: [
                       BoxShadow(
-                        color: (widget.isRecording
+                        color:
+                            (widget.isRecording
                                     ? const Color(0xFFFF6678)
+                                    : (widget.showRecordComposer || hasText)
+                                    ? _kSendGreen
                                     : _kAccent)
                                 .withValues(alpha: 0.24),
                         blurRadius: 18,
@@ -3895,6 +5548,835 @@ class _ChatContactInfoScreen extends StatelessWidget {
             ],
           );
         },
+      ),
+    );
+  }
+}
+
+class _ChatGroupInfoScreen extends StatefulWidget {
+  const _ChatGroupInfoScreen({required this.conversationId});
+
+  final String conversationId;
+
+  @override
+  State<_ChatGroupInfoScreen> createState() => _ChatGroupInfoScreenState();
+}
+
+class _ChatGroupInfoScreenState extends State<_ChatGroupInfoScreen> {
+  final MessagesRepository _messagesRepository = MessagesRepository();
+  final Map<String, Map<String, String>> _memberProfiles = {};
+  bool _loadingMembers = false;
+
+  Future<void> _loadMemberProfiles(List<String> uids) async {
+    if (_loadingMembers) return;
+    setState(() => _loadingMembers = true);
+    try {
+      for (final uid in uids) {
+        if (_memberProfiles.containsKey(uid)) continue;
+        final doc = await FirebaseFirestore.instance
+            .collection('users')
+            .doc(uid)
+            .get();
+        final data = doc.data() ?? {};
+        final accountType = (data['accountType'] as String?) ?? 'worker';
+        String aptName = '';
+        final aptId =
+            data['apartmentId'] as String? ??
+            data['propertyId'] as String? ??
+            data['managedPropertyId'] as String?;
+        if (aptId != null && aptId.isNotEmpty) {
+          final hotel = await FirebaseFirestore.instance
+              .collection('hotels')
+              .doc(aptId)
+              .get();
+          aptName = (hotel.data()?['name'] as String?) ?? '';
+        }
+        _memberProfiles[uid] = {
+          'displayName': (data['displayName'] as String?) ?? uid,
+          'accountType': accountType,
+          'apartmentName': aptName,
+        };
+      }
+    } finally {
+      if (mounted) setState(() => _loadingMembers = false);
+    }
+  }
+
+  String _badgeLabel(String accountType) {
+    if (accountType == 'manager' || accountType == 'apartment_manager') {
+      return 'Gestionnaire';
+    }
+    if (accountType == 'concierge' || accountType == 'stayfix_job') {
+      return 'Concierge';
+    }
+    return 'Intervenant';
+  }
+
+  bool _canManageMembers(String accountType) =>
+      accountType == 'manager' || accountType == 'apartment_manager';
+
+  Future<void> _postMemberSystemEvent({
+    required DocumentReference<Map<String, dynamic>> conversationRef,
+    required String text,
+    required String event,
+  }) async {
+    final currentUser = FirebaseAuth.instance.currentUser;
+    final profile = currentUser == null
+        ? null
+        : await _messagesRepository.loadProfileById(currentUser.uid);
+    await conversationRef.collection('messages').add({
+      'senderId': currentUser?.uid ?? '',
+      'senderName': profile?.name ?? 'Systeme',
+      'senderRole': profile?.badgeLabel,
+      'senderAccountType': profile?.accountType,
+      'senderPhotoUrl': profile?.photoUrl,
+      'senderPhotoBase64': profile?.photoBase64,
+      'text': text,
+      'type': 'system',
+      'createdAt': FieldValue.serverTimestamp(),
+      'seenBy': currentUser == null ? const <String>[] : [currentUser.uid],
+      'deliveredTo': currentUser == null ? const <String>[] : [currentUser.uid],
+      'metadata': {'event': event},
+    });
+    await conversationRef.set({
+      'systemBannerText': text,
+      'systemBannerAt': FieldValue.serverTimestamp(),
+      'lastMessage': text,
+      'lastMessageAt': FieldValue.serverTimestamp(),
+      'updatedAt': FieldValue.serverTimestamp(),
+    }, SetOptions(merge: true));
+  }
+
+  Future<void> _addMembers(
+    DocumentReference<Map<String, dynamic>> conversationRef,
+    List<String> currentMembers,
+  ) async {
+    final eligible = await _messagesRepository.loadEligibleGroupParticipants();
+    final available = eligible
+        .where((profile) => !currentMembers.contains(profile.userId))
+        .toList();
+    final selectedIds = <String>{};
+    if (!mounted) return;
+    final pickedIds = await showModalBottomSheet<List<String>>(
+      context: context,
+      backgroundColor: Colors.transparent,
+      isScrollControlled: true,
+      builder: (sheetContext) {
+        return StatefulBuilder(
+          builder: (context, setModalState) {
+            return SafeArea(
+              top: false,
+              child: Container(
+                padding: const EdgeInsets.fromLTRB(20, 16, 20, 24),
+                decoration: const BoxDecoration(
+                  color: Colors.white,
+                  borderRadius: BorderRadius.vertical(top: Radius.circular(32)),
+                ),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      'Ajouter des membres',
+                      style: GoogleFonts.inter(
+                        color: kMessagesText,
+                        fontSize: 16,
+                        fontWeight: FontWeight.w800,
+                      ),
+                    ),
+                    const SizedBox(height: 14),
+                    Flexible(
+                      child: ListView.separated(
+                        shrinkWrap: true,
+                        itemCount: available.length,
+                        separatorBuilder: (_, _) => const SizedBox(height: 10),
+                        itemBuilder: (context, index) {
+                          final member = available[index];
+                          final selected = selectedIds.contains(member.userId);
+                          return InkWell(
+                            onTap: () {
+                              setModalState(() {
+                                if (selected) {
+                                  selectedIds.remove(member.userId);
+                                } else {
+                                  selectedIds.add(member.userId);
+                                }
+                              });
+                            },
+                            borderRadius: BorderRadius.circular(18),
+                            child: Container(
+                              padding: const EdgeInsets.all(14),
+                              decoration: BoxDecoration(
+                                color: selected
+                                    ? const Color(0xFFEFF6FF)
+                                    : Colors.white,
+                                borderRadius: BorderRadius.circular(18),
+                                border: Border.all(
+                                  color: selected
+                                      ? const Color(0xFF93C5FD)
+                                      : const Color(0xFFDCE7FA),
+                                ),
+                              ),
+                              child: Row(
+                                children: [
+                                  CircleAvatar(
+                                    radius: 22,
+                                    backgroundColor: const Color(0xFFEFF6FF),
+                                    backgroundImage: member.avatarImage,
+                                    child: member.avatarImage == null
+                                        ? Text(member.initials)
+                                        : null,
+                                  ),
+                                  const SizedBox(width: 12),
+                                  Expanded(
+                                    child: Text(
+                                      member.name,
+                                      style: GoogleFonts.inter(
+                                        color: kMessagesText,
+                                        fontSize: 14,
+                                        fontWeight: FontWeight.w700,
+                                      ),
+                                    ),
+                                  ),
+                                  Icon(
+                                    selected
+                                        ? LucideIcons.checkCircle2
+                                        : LucideIcons.circle,
+                                    color: selected
+                                        ? const Color(0xFF16A34A)
+                                        : const Color(0xFF94A3B8),
+                                  ),
+                                ],
+                              ),
+                            ),
+                          );
+                        },
+                      ),
+                    ),
+                    const SizedBox(height: 16),
+                    SizedBox(
+                      width: double.infinity,
+                      child: ElevatedButton(
+                        onPressed: selectedIds.isEmpty
+                            ? null
+                            : () => Navigator.pop(
+                                sheetContext,
+                                selectedIds.toList(),
+                              ),
+                        style: ElevatedButton.styleFrom(
+                          backgroundColor: _kAccent,
+                          foregroundColor: Colors.white,
+                          minimumSize: const Size.fromHeight(50),
+                          shape: RoundedRectangleBorder(
+                            borderRadius: BorderRadius.circular(18),
+                          ),
+                        ),
+                        child: const Text(
+                          'Ajouter au groupe',
+                          style: TextStyle(fontWeight: FontWeight.w800),
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            );
+          },
+        );
+      },
+    );
+
+    if (pickedIds == null || pickedIds.isEmpty) return;
+    final updatedMembers = <String>{...currentMembers, ...pickedIds}.toList();
+    await conversationRef.set({
+      'participants': updatedMembers,
+      'members': updatedMembers,
+      'memberCount': updatedMembers.length,
+      'updatedAt': FieldValue.serverTimestamp(),
+      for (final memberId in pickedIds) 'unreadBy.$memberId': 0,
+    }, SetOptions(merge: true));
+    for (final memberId in pickedIds) {
+      final profile = available.firstWhere((item) => item.userId == memberId);
+      await _postMemberSystemEvent(
+        conversationRef: conversationRef,
+        text: '${profile.name} a ete ajoute au groupe.',
+        event: 'member_added',
+      );
+    }
+  }
+
+  Future<void> _removeMember(
+    DocumentReference<Map<String, dynamic>> conversationRef,
+    List<String> currentMembers,
+    String memberId,
+  ) async {
+    final nextMembers = currentMembers.where((id) => id != memberId).toList();
+    final profile = await _messagesRepository.loadProfileById(memberId);
+    await conversationRef.set({
+      'participants': nextMembers,
+      'members': nextMembers,
+      'memberCount': nextMembers.length,
+      'updatedAt': FieldValue.serverTimestamp(),
+    }, SetOptions(merge: true));
+    await _postMemberSystemEvent(
+      conversationRef: conversationRef,
+      text: '${profile?.name ?? memberId} a ete retire du groupe.',
+      event: 'member_removed',
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final uid = FirebaseAuth.instance.currentUser?.uid ?? '';
+    final conversationRef = FirebaseFirestore.instance
+        .collection('conversations')
+        .doc(widget.conversationId);
+
+    return Scaffold(
+      backgroundColor: kMessagesPageBg,
+      body: StreamBuilder<DocumentSnapshot<Map<String, dynamic>>>(
+        stream: conversationRef.snapshots(),
+        builder: (context, snapshot) {
+          final data = snapshot.data?.data() ?? const <String, dynamic>{};
+          final groupName =
+              (data['name'] as String?) ??
+              (data['title'] as String?) ??
+              'Groupe';
+          final avatarUrl = data['avatarUrl'] as String?;
+          final members =
+              (((data['members'] as List?) ??
+                      (data['participants'] as List?) ??
+                      const [])
+                  .map((e) => '$e')
+                  .toList());
+          final mutedBy = ((data['mutedBy'] as List?) ?? [])
+              .map((e) => '$e')
+              .toSet();
+          final notificationsEnabled = !mutedBy.contains(uid);
+          final currentAccountType = _memberProfiles[uid]?['accountType'] ?? '';
+          final canManageMembers = _canManageMembers(currentAccountType);
+
+          if (members.isNotEmpty) {
+            WidgetsBinding.instance.addPostFrameCallback(
+              (_) => _loadMemberProfiles(members),
+            );
+          }
+
+          return CustomScrollView(
+            slivers: [
+              SliverAppBar(
+                pinned: true,
+                elevation: 0,
+                backgroundColor: kMessagesPageBg,
+                leading: IconButton(
+                  onPressed: () => Navigator.pop(context),
+                  icon: const Icon(LucideIcons.arrowLeft, color: kMessagesText),
+                ),
+                title: Text(
+                  'Group info',
+                  style: GoogleFonts.inter(
+                    color: kMessagesText,
+                    fontWeight: FontWeight.w800,
+                  ),
+                ),
+              ),
+              SliverToBoxAdapter(
+                child: Padding(
+                  padding: const EdgeInsets.fromLTRB(18, 18, 18, 32),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Container(
+                        width: double.infinity,
+                        padding: const EdgeInsets.fromLTRB(20, 22, 20, 22),
+                        decoration: BoxDecoration(
+                          gradient: const LinearGradient(
+                            colors: [kMessagesBlue, kMessagesDeepBlue],
+                            begin: Alignment.topLeft,
+                            end: Alignment.bottomRight,
+                          ),
+                          borderRadius: BorderRadius.circular(30),
+                          boxShadow: const [
+                            BoxShadow(
+                              color: Color(0x1F2563EB),
+                              blurRadius: 28,
+                              offset: Offset(0, 14),
+                            ),
+                          ],
+                        ),
+                        child: Row(
+                          children: [
+                            Container(
+                              width: 92,
+                              height: 92,
+                              padding: const EdgeInsets.all(3),
+                              decoration: BoxDecoration(
+                                color: Colors.white.withValues(alpha: 0.18),
+                                shape: BoxShape.circle,
+                              ),
+                              child: ClipOval(
+                                child: avatarUrl != null && avatarUrl.isNotEmpty
+                                    ? Image.network(
+                                        avatarUrl,
+                                        fit: BoxFit.cover,
+                                        errorBuilder: (ctx, err, trace) =>
+                                            _ContactInfoInitial(
+                                              title: groupName,
+                                            ),
+                                      )
+                                    : _ContactInfoInitial(title: groupName),
+                              ),
+                            ),
+                            const SizedBox(width: 16),
+                            Expanded(
+                              child: Column(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                children: [
+                                  Container(
+                                    padding: const EdgeInsets.symmetric(
+                                      horizontal: 10,
+                                      vertical: 6,
+                                    ),
+                                    decoration: BoxDecoration(
+                                      color: Colors.white.withValues(
+                                        alpha: 0.14,
+                                      ),
+                                      borderRadius: BorderRadius.circular(999),
+                                    ),
+                                    child: Text(
+                                      'Groupe · ${members.length} membres',
+                                      style: GoogleFonts.inter(
+                                        color: Colors.white,
+                                        fontSize: 11,
+                                        fontWeight: FontWeight.w700,
+                                      ),
+                                    ),
+                                  ),
+                                  const SizedBox(height: 12),
+                                  Text(
+                                    groupName,
+                                    style: GoogleFonts.inter(
+                                      color: Colors.white,
+                                      fontSize: 22,
+                                      fontWeight: FontWeight.w800,
+                                      height: 1.08,
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                      const SizedBox(height: 28),
+                      _ContactInfoPanel(
+                        title: 'Paramètres',
+                        child: Column(
+                          children: [
+                            _ContactInfoTile(
+                              icon: LucideIcons.bell,
+                              title: 'Notifications',
+                              subtitle: notificationsEnabled
+                                  ? 'Activées pour ce groupe'
+                                  : 'Désactivées pour ce groupe',
+                              trailing: Switch(
+                                value: notificationsEnabled,
+                                onChanged: (enabled) {
+                                  final op = enabled
+                                      ? FieldValue.arrayRemove([uid])
+                                      : FieldValue.arrayUnion([uid]);
+                                  conversationRef.set({
+                                    'mutedBy': op,
+                                  }, SetOptions(merge: true));
+                                },
+                              ),
+                            ),
+                            if (canManageMembers)
+                              _ContactInfoTile(
+                                icon: LucideIcons.userPlus,
+                                title: 'Ajouter un membre',
+                                subtitle:
+                                    'Invitez des intervenants StayFix Job dans ce groupe.',
+                                onTap: () =>
+                                    _addMembers(conversationRef, members),
+                              ),
+                            _ContactInfoTile(
+                              icon: LucideIcons.trash2,
+                              title: 'Clear chat',
+                              subtitle:
+                                  'Supprimez les messages visibles pour repartir sur une base propre.',
+                              destructive: true,
+                              onTap: () async {
+                                await _clearConversationHistoryById(
+                                  widget.conversationId,
+                                );
+                                if (context.mounted) Navigator.pop(context);
+                              },
+                            ),
+                          ],
+                        ),
+                      ),
+                      const SizedBox(height: 18),
+                      _ContactInfoPanel(
+                        title: '${members.length} membre(s)',
+                        child: Column(
+                          children: members.map((memberId) {
+                            final profile = _memberProfiles[memberId];
+                            final name = profile?['displayName'] ?? memberId;
+                            final accountType = profile?['accountType'] ?? '';
+                            final aptName = profile?['apartmentName'] ?? '';
+                            final subtitle = accountType.isNotEmpty
+                                ? '${_badgeLabel(accountType)}${aptName.isNotEmpty ? ' · $aptName' : ''}'
+                                : null;
+                            return _ContactInfoTile(
+                              icon: LucideIcons.user,
+                              title: name,
+                              subtitle: subtitle ?? '',
+                              trailing: canManageMembers && memberId != uid
+                                  ? IconButton(
+                                      onPressed: () => _removeMember(
+                                        conversationRef,
+                                        members,
+                                        memberId,
+                                      ),
+                                      icon: const Icon(
+                                        LucideIcons.userMinus,
+                                        color: Color(0xFFDC2626),
+                                        size: 18,
+                                      ),
+                                    )
+                                  : null,
+                            );
+                          }).toList(),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            ],
+          );
+        },
+      ),
+    );
+  }
+}
+
+class _MissionActionButton extends StatelessWidget {
+  const _MissionActionButton({
+    required this.label,
+    required this.filled,
+    required this.onTap,
+  });
+
+  final String label;
+  final bool filled;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    return GestureDetector(
+      onTap: onTap,
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+        decoration: BoxDecoration(
+          color: filled ? const Color(0xFF0F63FF) : Colors.transparent,
+          borderRadius: BorderRadius.circular(999),
+          border: Border.all(color: const Color(0xFF0F63FF), width: 1.5),
+        ),
+        child: Text(
+          label,
+          style: TextStyle(
+            color: filled ? Colors.white : const Color(0xFF0F63FF),
+            fontSize: 11.5,
+            fontWeight: FontWeight.w800,
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+enum _MissionHistoryFilter { ongoing, completed, deleted }
+
+class _MissionHistoryScreen extends StatefulWidget {
+  const _MissionHistoryScreen({
+    required this.tasks,
+    required this.canCreateMission,
+  });
+
+  final List<TaskModel> tasks;
+  final bool canCreateMission;
+
+  @override
+  State<_MissionHistoryScreen> createState() => _MissionHistoryScreenState();
+}
+
+class _MissionHistoryScreenState extends State<_MissionHistoryScreen> {
+  _MissionHistoryFilter _filter = _MissionHistoryFilter.ongoing;
+
+  List<TaskModel> get _filteredTasks {
+    final tasks = widget.tasks.where((task) {
+      switch (_filter) {
+        case _MissionHistoryFilter.ongoing:
+          return !task.isDeleted &&
+              task.status != 'completed' &&
+              !task.isFullyCompleted;
+        case _MissionHistoryFilter.completed:
+          return !task.isDeleted &&
+              (task.status == 'completed' || task.isFullyCompleted);
+        case _MissionHistoryFilter.deleted:
+          return task.isDeleted;
+      }
+    }).toList();
+    tasks.sort(
+      (a, b) =>
+          (b.updatedAt ?? b.createdAt).compareTo(a.updatedAt ?? a.createdAt),
+    );
+    return tasks;
+  }
+
+  String _assigneeLabel(TaskModel task) {
+    final ids = task.assignedMemberIds.isNotEmpty
+        ? task.assignedMemberIds
+        : <String>[
+            if ((task.assignedToId ?? '').trim().isNotEmpty)
+              task.assignedToId!.trim(),
+          ];
+    final names = ids.map((id) {
+      if (task.assignedMemberNames[id]?.trim().isNotEmpty == true) {
+        return task.assignedMemberNames[id]!.trim();
+      }
+      if ((task.assignedToId ?? '').trim() == id &&
+          (task.assignedToName ?? '').trim().isNotEmpty) {
+        return task.assignedToName!.trim();
+      }
+      return id;
+    }).toList();
+    if (names.isEmpty) return 'Tout le monde';
+    if (names.length == 1) return names.first;
+    if (names.length == 2) return '${names.first} et ${names.last}';
+    return '${names.take(names.length - 1).join(', ')} et ${names.last}';
+  }
+
+  String _statusLabel(TaskModel task) {
+    if (task.isDeleted) return 'Supprimee';
+    if (task.status == 'completed' || task.isFullyCompleted) return 'Terminee';
+    if (task.status == 'accepted') return 'En cours';
+    return 'A faire';
+  }
+
+  Color _statusColor(TaskModel task) {
+    if (task.isDeleted) return const Color(0xFFDC2626);
+    if (task.status == 'completed' || task.isFullyCompleted) {
+      return const Color(0xFF16A34A);
+    }
+    if (task.status == 'accepted') return const Color(0xFF0F63FF);
+    return const Color(0xFF1D4ED8);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final tasks = _filteredTasks;
+    return Scaffold(
+      backgroundColor: const Color(0xFFF7FAFF),
+      appBar: AppBar(
+        elevation: 0,
+        backgroundColor: Colors.white,
+        foregroundColor: kMessagesText,
+        title: const Text(
+          'Missions',
+          style: TextStyle(fontWeight: FontWeight.w800),
+        ),
+      ),
+      body: Padding(
+        padding: const EdgeInsets.fromLTRB(16, 12, 16, 16),
+        child: Column(
+          children: [
+            Row(
+              children: [
+                _MissionHistoryChip(
+                  label: 'En cours',
+                  active: _filter == _MissionHistoryFilter.ongoing,
+                  onTap: () =>
+                      setState(() => _filter = _MissionHistoryFilter.ongoing),
+                ),
+                const SizedBox(width: 8),
+                _MissionHistoryChip(
+                  label: 'Terminees',
+                  active: _filter == _MissionHistoryFilter.completed,
+                  onTap: () =>
+                      setState(() => _filter = _MissionHistoryFilter.completed),
+                ),
+                const SizedBox(width: 8),
+                _MissionHistoryChip(
+                  label: 'Supprimees',
+                  active: _filter == _MissionHistoryFilter.deleted,
+                  onTap: () =>
+                      setState(() => _filter = _MissionHistoryFilter.deleted),
+                ),
+              ],
+            ),
+            const SizedBox(height: 14),
+            Expanded(
+              child: tasks.isEmpty
+                  ? Container(
+                      width: double.infinity,
+                      padding: const EdgeInsets.all(20),
+                      decoration: BoxDecoration(
+                        color: Colors.white,
+                        borderRadius: BorderRadius.circular(24),
+                        border: Border.all(color: const Color(0xFFD7E4FF)),
+                      ),
+                      child: const Text(
+                        'Aucune mission dans cette section.',
+                        style: TextStyle(
+                          color: kMessagesBody,
+                          fontSize: 14,
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
+                    )
+                  : ListView.separated(
+                      itemCount: tasks.length,
+                      separatorBuilder: (_, _) => const SizedBox(height: 12),
+                      itemBuilder: (context, index) {
+                        final task = tasks[index];
+                        final statusColor = _statusColor(task);
+                        return Container(
+                          padding: const EdgeInsets.all(16),
+                          decoration: BoxDecoration(
+                            gradient: LinearGradient(
+                              colors: task.isDeleted
+                                  ? const [Color(0xFFFFF1F2), Color(0xFFFFFFFF)]
+                                  : task.status == 'completed' ||
+                                        task.isFullyCompleted
+                                  ? const [Color(0xFFEFFDF5), Color(0xFFFFFFFF)]
+                                  : const [
+                                      Color(0xFFEFF6FF),
+                                      Color(0xFFFFFFFF),
+                                    ],
+                              begin: Alignment.topLeft,
+                              end: Alignment.bottomRight,
+                            ),
+                            borderRadius: BorderRadius.circular(24),
+                            border: Border.all(
+                              color: statusColor.withValues(alpha: 0.25),
+                            ),
+                          ),
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Row(
+                                children: [
+                                  Container(
+                                    padding: const EdgeInsets.symmetric(
+                                      horizontal: 10,
+                                      vertical: 5,
+                                    ),
+                                    decoration: BoxDecoration(
+                                      color: statusColor.withValues(
+                                        alpha: 0.12,
+                                      ),
+                                      borderRadius: BorderRadius.circular(999),
+                                    ),
+                                    child: Text(
+                                      _statusLabel(task),
+                                      style: TextStyle(
+                                        color: statusColor,
+                                        fontSize: 11.5,
+                                        fontWeight: FontWeight.w800,
+                                      ),
+                                    ),
+                                  ),
+                                  const Spacer(),
+                                  if (!task.isDeleted && task.assigneeCount > 0)
+                                    Text(
+                                      'Progression ${task.progressLabel}',
+                                      style: TextStyle(
+                                        color: statusColor,
+                                        fontSize: 12,
+                                        fontWeight: FontWeight.w700,
+                                      ),
+                                    ),
+                                ],
+                              ),
+                              const SizedBox(height: 12),
+                              Text(
+                                task.title,
+                                style: const TextStyle(
+                                  color: kMessagesText,
+                                  fontSize: 16,
+                                  fontWeight: FontWeight.w800,
+                                ),
+                              ),
+                              const SizedBox(height: 8),
+                              Text(
+                                'Pour ${_assigneeLabel(task)}',
+                                style: const TextStyle(
+                                  color: kMessagesBlue,
+                                  fontSize: 13,
+                                  fontWeight: FontWeight.w700,
+                                ),
+                              ),
+                              const SizedBox(height: 8),
+                              Text(
+                                task.instruction,
+                                style: const TextStyle(
+                                  color: kMessagesBody,
+                                  fontSize: 13.4,
+                                  height: 1.45,
+                                  fontWeight: FontWeight.w500,
+                                ),
+                              ),
+                            ],
+                          ),
+                        );
+                      },
+                    ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _MissionHistoryChip extends StatelessWidget {
+  const _MissionHistoryChip({
+    required this.label,
+    required this.active,
+    required this.onTap,
+  });
+
+  final String label;
+  final bool active;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    return Expanded(
+      child: GestureDetector(
+        onTap: onTap,
+        child: Container(
+          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 11),
+          decoration: BoxDecoration(
+            color: active ? const Color(0xFF0F63FF) : Colors.white,
+            borderRadius: BorderRadius.circular(16),
+            border: Border.all(
+              color: active ? const Color(0xFF0F63FF) : const Color(0xFFD7E4FF),
+            ),
+          ),
+          child: Text(
+            label,
+            textAlign: TextAlign.center,
+            style: TextStyle(
+              color: active ? Colors.white : kMessagesBlue,
+              fontSize: 12.5,
+              fontWeight: FontWeight.w800,
+            ),
+          ),
+        ),
       ),
     );
   }

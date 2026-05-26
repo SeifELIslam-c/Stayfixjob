@@ -8,13 +8,14 @@ import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 import '../models/manager_offer.dart';
 import '../services/offers_service.dart';
+import '../widgets/unread_messages_nav_item.dart';
 import 'create_worker_offer_screen.dart';
 import 'home_screen.dart';
 import 'messages_screen.dart';
 import 'offer_detail_screen.dart';
 import 'profile_screen.dart';
 
-// ── Color palette (identical to original — constants keep same names) ──────────
+//   Color palette (identical to original — constants keep same names)
 const kOffersBlue = Color(0xFF0F63FF);
 const kOffersDeepBlue = Color(0xFF0047D8);
 const kOffersDarkBlue = Color(0xFF0036B5);
@@ -26,7 +27,7 @@ const kOffersLightBlue = Color(0xFFEFF6FF);
 const kOffersSuccess = Color(0xFF16A34A);
 const kOffersWarning = Color(0xFFF59E0B);
 
-// ── Main screen ───────────────────────────────────────────────────────────────
+//   Main screen   ─
 
 class OffersScreen extends StatefulWidget {
   const OffersScreen({super.key});
@@ -45,7 +46,7 @@ class _OffersScreenState extends State<OffersScreen> {
   String? _errorMessage;
   bool _isLoading = true;
 
-  // ── Tab state ─────────────────────────────────────────────────────────────
+  //   Tab state  ─
   int _activeTab = 0; // 0 = Offres disponibles, 1 = Mes offres
   List<ManagerOffer> _myOffers = [];
   List<WorkerOffer> _myPublishedOffers = [];
@@ -70,7 +71,7 @@ class _OffersScreenState extends State<OffersScreen> {
     super.dispose();
   }
 
-  // ── Data loading ──────────────────────────────────────────────────────────
+  //   Data loading
 
   Future<void> _loadAll() async {
     setState(() {
@@ -98,13 +99,26 @@ class _OffersScreenState extends State<OffersScreen> {
           originLongitude: profile.addressLongitude,
         ),
         _service.loadAppliedOfferIds(),
+        _service.loadManagerCreatedOffersForStayfixJob(),
       ]);
+
+      final deptOffers = results[0] as List<ManagerOffer>;
+      final appliedIds = results[1] as Set<String>;
+      final stayfixOffers = results[2] as List<ManagerOffer>;
+
+      // Merge department offers and stayfix_job manager offers, dedup by ID
+      final byId = <String, ManagerOffer>{
+        for (final o in deptOffers) o.id: o,
+        for (final o in stayfixOffers) o.id: o,
+      };
+      final allOffers = byId.values.toList()
+        ..sort((a, b) => b.createdAt.compareTo(a.createdAt));
 
       if (mounted) {
         setState(() {
           _profile = profile;
-          _allOffers = results[0] as List<ManagerOffer>;
-          _appliedIds = results[1] as Set<String>;
+          _allOffers = allOffers;
+          _appliedIds = appliedIds;
           _isLoading = false;
         });
       }
@@ -139,7 +153,7 @@ class _OffersScreenState extends State<OffersScreen> {
     }
   }
 
-  // ── Derived lists ─────────────────────────────────────────────────────────
+  //   Derived lists                             ─
 
   List<ManagerOffer> get _filteredOffers {
     final query = _searchController.text.trim().toLowerCase();
@@ -175,7 +189,7 @@ class _OffersScreenState extends State<OffersScreen> {
   List<ManagerOffer> get _urgentOffers =>
       _filteredOffers.where((o) => o.isUrgent).toList();
 
-  // ── Mes offres grouping ───────────────────────────────────────────────────
+  //   Mes offres grouping                          ─
 
   /// Parses French date strings such as "20 Mai 2025", "Aujourd'hui", "Demain",
   /// or ISO "yyyy-MM-dd" into a DateTime. Returns null if unparseable.
@@ -220,7 +234,7 @@ class _OffersScreenState extends State<OffersScreen> {
   List<ManagerOffer> get _terminees =>
       _myOffers.where((o) => o.status == OfferStatus.completed).toList();
 
-  // ── Navigation ────────────────────────────────────────────────────────────
+  //   Navigation
 
   void _openHome() => Navigator.of(context).pushReplacement(
     MaterialPageRoute(builder: (_) => const HomeScreen(requireAuth: false)),
@@ -248,6 +262,57 @@ class _OffersScreenState extends State<OffersScreen> {
     }
   }
 
+  Future<void> _openEditPublishedOffer(WorkerOffer offer) async {
+    final profile = _profile;
+    if (profile == null) return;
+    final updated = await Navigator.of(context).push<bool>(
+      MaterialPageRoute(
+        builder: (_) => CreateWorkerOfferScreen(
+          worker: profile,
+          offersService: _service,
+          existingOffer: offer,
+        ),
+      ),
+    );
+    if (updated == true) {
+      _loadMyOffers();
+    }
+  }
+
+  Future<void> _deletePublishedOffer(WorkerOffer offer) async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Supprimer cette offre ?'),
+        content: const Text(
+          'Cette offre sera retirée définitivement de vos offres publiées.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('Annuler'),
+          ),
+          ElevatedButton(
+            onPressed: () => Navigator.pop(context, true),
+            style: ElevatedButton.styleFrom(
+              backgroundColor: const Color(0xFFDC2626),
+              foregroundColor: Colors.white,
+            ),
+            child: const Text('Supprimer'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true) return;
+
+    await _service.deleteWorkerOffer(offer);
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(content: Text('Offre supprimée avec succès.')),
+    );
+    _loadMyOffers();
+  }
+
   void _openDetail(ManagerOffer offer) => Navigator.of(context)
       .push(
         MaterialPageRoute(
@@ -261,7 +326,7 @@ class _OffersScreenState extends State<OffersScreen> {
       )
       .then((_) => _loadAll()); // Refresh applied state on return
 
-  // ── Build ─────────────────────────────────────────────────────────────────
+  //   Build    ─
 
   @override
   Widget build(BuildContext context) {
@@ -357,7 +422,6 @@ class _OffersScreenState extends State<OffersScreen> {
     return SafeArea(
       child: Column(
         children: [
-          _buildHeader(profile),
           _buildTabBar(),
           Expanded(
             child: ListView(
@@ -401,8 +465,9 @@ class _OffersScreenState extends State<OffersScreen> {
     );
   }
 
-  // ── Header ────────────────────────────────────────────────────────────────
+  //   Header
 
+  // ignore: unused_element
   Widget _buildHeader(WorkerProfile profile) {
     return Container(
       color: Colors.white,
@@ -492,7 +557,7 @@ class _OffersScreenState extends State<OffersScreen> {
     );
   }
 
-  // ── Segmented tab bar ─────────────────────────────────────────────────────
+  //   Segmented tab bar                           ─
 
   Widget _buildTabBar() {
     return Container(
@@ -552,7 +617,7 @@ class _OffersScreenState extends State<OffersScreen> {
     );
   }
 
-  // ── Search row ────────────────────────────────────────────────────────────
+  //   Search row
 
   Widget _buildSearchRow() {
     return Row(
@@ -649,7 +714,7 @@ class _OffersScreenState extends State<OffersScreen> {
     );
   }
 
-  // ── Profile chips ─────────────────────────────────────────────────────────
+  //   Profile chips                             ─
 
   Widget _buildProfileChips(WorkerProfile profile) {
     final chips = ['Toutes', ...profile.specialties];
@@ -721,7 +786,7 @@ class _OffersScreenState extends State<OffersScreen> {
     );
   }
 
-  // ── Section header ────────────────────────────────────────────────────────
+  //   Section header
 
   Widget _buildSectionHeader({
     required String title,
@@ -771,7 +836,7 @@ class _OffersScreenState extends State<OffersScreen> {
     );
   }
 
-  // ── Urgent carousel ───────────────────────────────────────────────────────
+  //   Urgent carousel                            ─
 
   Widget _buildUrgentCarousel(List<ManagerOffer> urgentOffers) {
     return Column(
@@ -973,7 +1038,7 @@ class _OffersScreenState extends State<OffersScreen> {
     );
   }
 
-  // ── Offer card ────────────────────────────────────────────────────────────
+  //   Offer card
 
   Widget _buildOfferCard(ManagerOffer offer) {
     final budgetFormatted = NumberFormat(
@@ -1153,7 +1218,7 @@ class _OffersScreenState extends State<OffersScreen> {
     );
   }
 
-  // ── Empty state ───────────────────────────────────────────────────────────
+  //   Empty state                              ─
 
   Widget _buildEmptyOffersState() {
     return Container(
@@ -1203,11 +1268,9 @@ class _OffersScreenState extends State<OffersScreen> {
     );
   }
 
-  // ── Mes offres tab ────────────────────────────────────────────────────────
+  //   Mes offres tab
 
   Widget _buildMesOffres() {
-    final profile = _profile;
-
     if (_myOffersLoading) {
       return const Center(child: CircularProgressIndicator(color: kOffersBlue));
     }
@@ -1215,21 +1278,23 @@ class _OffersScreenState extends State<OffersScreen> {
     final enCours = _enCours;
     final aVenir = _aVenir;
     final terminees = _terminees;
+    final hasPublishedOffers = _myPublishedOffers.isNotEmpty;
     final hasAny =
-        enCours.isNotEmpty || aVenir.isNotEmpty || terminees.isNotEmpty;
+        hasPublishedOffers ||
+        enCours.isNotEmpty ||
+        aVenir.isNotEmpty ||
+        terminees.isNotEmpty;
 
     return SafeArea(
       child: Column(
         children: [
-          if (profile != null) _buildHeader(profile),
           _buildTabBar(),
           Expanded(
             child: hasAny
                 ? ListView(
                     padding: const EdgeInsets.fromLTRB(20, 16, 20, 100),
                     children: [
-                      if (_myPublishedOffers.isNotEmpty)
-                        _buildPublishedOffersSection(),
+                      if (hasPublishedOffers) _buildPublishedOffersSection(),
                       if (enCours.isNotEmpty)
                         _buildMySection(
                           icon: LucideIcons.clock,
@@ -1345,6 +1410,21 @@ class _OffersScreenState extends State<OffersScreen> {
                     ],
                   ),
                 ),
+                const SizedBox(width: 10),
+                Column(
+                  children: [
+                    _IconBtn(
+                      icon: LucideIcons.pencil,
+                      onTap: () => _openEditPublishedOffer(offer),
+                    ),
+                    const SizedBox(height: 8),
+                    _IconBtn(
+                      icon: LucideIcons.trash2,
+                      onTap: () => _deletePublishedOffer(offer),
+                    ),
+                  ],
+                ),
+                const SizedBox(width: 10),
                 Container(
                   padding: const EdgeInsets.symmetric(
                     horizontal: 10,
@@ -1618,8 +1698,9 @@ class _OffersScreenState extends State<OffersScreen> {
     if (s.contains('élec') || s.contains('elec')) return LucideIcons.zap;
     if (s.contains('peinture')) return LucideIcons.paintbrush;
     if (s.contains('clim') || s.contains('hvac')) return LucideIcons.wind;
-    if (s.contains('ménage') || s.contains('menage'))
+    if (s.contains('ménage') || s.contains('menage')) {
       return LucideIcons.sparkles;
+    }
     return LucideIcons.briefcase;
   }
 
@@ -1710,7 +1791,7 @@ class _OffersScreenState extends State<OffersScreen> {
   }
 }
 
-// ── Small reusable widgets ────────────────────────────────────────────────────
+//   Small reusable widgets
 
 class _IconBtn extends StatelessWidget {
   const _IconBtn({required this.icon, required this.onTap});
@@ -1816,7 +1897,7 @@ class _UrgencyBadge extends StatelessWidget {
   }
 }
 
-// ── BOTTOM NAV — DO NOT MODIFY — verbatim copy of original ───────────────────
+//   BOTTOM NAV — DO NOT MODIFY — verbatim copy of original          ─
 
 class _OffersBottomNav extends StatelessWidget {
   final VoidCallback onHomeTap;
@@ -1868,10 +1949,11 @@ class _OffersBottomNav extends StatelessWidget {
                 ),
               ),
               Expanded(
-                child: _BottomNavItem(
-                  icon: LucideIcons.messageCircle,
-                  label: 'Messages',
+                child: UnreadMessagesNavItem(
                   active: false,
+                  activeColor: kOffersBlue,
+                  inactiveColor: kOffersMuted,
+                  indicatorColor: kOffersBlue,
                   onTap: onMessagesTap,
                 ),
               ),

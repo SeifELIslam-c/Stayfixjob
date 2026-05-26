@@ -1,5 +1,8 @@
+import 'dart:async';
 import 'dart:io';
+
 import 'package:flutter/material.dart';
+import 'package:google_fonts/google_fonts.dart';
 import 'package:image_cropper/image_cropper.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
@@ -7,15 +10,43 @@ import 'package:video_player/video_player.dart';
 
 import '../services/offers_service.dart' show WorkerProfile;
 import '../services/story_service.dart';
+import '../services/vps_media_service.dart';
 
-// ── Colors ────────────────────────────────────────────────────────────────────
 const _kBlue = Color(0xFF0F63FF);
 const _kMuted = Color(0xFF64748B);
+const _kBorder = Color(0xFFDCE8FF);
 
-// ── Visibility options ────────────────────────────────────────────────────────
-const _kVisibilityOptions = [
-  'Les abonnés proches de moi',
-  'Tout le monde',
+const _kVisibilityOptions = <_StoryVisibilityOption>[
+  _StoryVisibilityOption(
+    key: 'nearby_subscribers',
+    label: 'Les abonnes proches de moi',
+  ),
+  _StoryVisibilityOption(key: 'public', label: 'Tout le monde'),
+];
+
+final _kOverlayFonts = <TextStyle Function(double, Color)>[
+  (size, color) => TextStyle(
+        color: color,
+        fontSize: size,
+        fontWeight: FontWeight.w800,
+        height: 1.15,
+      ),
+  (size, color) => GoogleFonts.bebasNeue(
+        color: color,
+        fontSize: size + 6,
+        letterSpacing: 0.4,
+      ),
+  (size, color) => GoogleFonts.playfairDisplay(
+        color: color,
+        fontSize: size,
+        fontWeight: FontWeight.w700,
+        height: 1.12,
+      ),
+  (size, color) => GoogleFonts.oswald(
+        color: color,
+        fontSize: size,
+        fontWeight: FontWeight.w700,
+      ),
 ];
 
 class AddWorkerStoryScreen extends StatefulWidget {
@@ -30,23 +61,28 @@ class AddWorkerStoryScreen extends StatefulWidget {
 class _AddWorkerStoryScreenState extends State<AddWorkerStoryScreen> {
   final _storyService = StoryService();
   final _captionCtrl = TextEditingController();
-  final _textController = TextEditingController();
+  final _overlayTextCtrl = TextEditingController();
+  final _overlayTextFocusNode = FocusNode();
   final _picker = ImagePicker();
 
   File? _selectedMedia;
+  VpsUploadedMedia? _uploadedMedia;
   String _mediaType = '';
   double? _aspectRatio;
   VideoPlayerController? _videoCtrl;
   bool _videoReady = false;
 
-  String _overlayText = '';
-  Offset _textOffset = const Offset(0.5, 0.4);
-  bool _editingText = false;
-
   late String _selectedSpecialty;
-  String _visibility = _kVisibilityOptions.first;
+  _StoryVisibilityOption _selectedVisibility = _kVisibilityOptions.first;
   bool _isPublishing = false;
-  double _uploadProgress = 0.0;
+  bool _isUploadingMedia = false;
+  bool _isEditingOverlayText = false;
+  double _uploadProgress = 0;
+  double _overlayTextX = 0.5;
+  double _overlayTextY = 0.42;
+  double _overlayTextScale = 1;
+  double _overlayTextScaleStart = 1;
+  int _overlayFontIndex = 0;
 
   @override
   void initState() {
@@ -59,18 +95,17 @@ class _AddWorkerStoryScreenState extends State<AddWorkerStoryScreen> {
   @override
   void dispose() {
     _captionCtrl.dispose();
-    _textController.dispose();
+    _overlayTextCtrl.dispose();
+    _overlayTextFocusNode.dispose();
     _videoCtrl?.dispose();
     super.dispose();
   }
-
-  // ── Media picking ─────────────────────────────────────────────────────────
 
   Future<void> _pickMedia() async {
     final choice = await showModalBottomSheet<String>(
       context: context,
       backgroundColor: Colors.transparent,
-      builder: (_) => _MediaPickerSheet(),
+      builder: (_) => const _MediaPickerSheet(),
     );
     if (choice == null || !mounted) return;
 
@@ -78,7 +113,8 @@ class _AddWorkerStoryScreenState extends State<AddWorkerStoryScreen> {
     if (choice == 'photo') {
       xfile = await _picker.pickImage(
         source: ImageSource.gallery,
-        imageQuality: 90,
+        imageQuality: 88,
+        maxWidth: 2160,
       );
     } else {
       xfile = await _picker.pickVideo(
@@ -88,69 +124,181 @@ class _AddWorkerStoryScreenState extends State<AddWorkerStoryScreen> {
     }
     if (xfile == null || !mounted) return;
 
-    final file = File(xfile.path);
+    await _discardPendingUploadedMedia();
     await _videoCtrl?.dispose();
     _videoCtrl = null;
 
+    final file = File(xfile.path);
     if (choice == 'photo') {
       final bytes = await file.readAsBytes();
       final decoded = await decodeImageFromList(bytes);
-      final ratio = decoded.width / decoded.height;
       setState(() {
         _selectedMedia = file;
+        _uploadedMedia = null;
         _mediaType = 'image';
-        _aspectRatio = ratio;
+        _aspectRatio = decoded.width / decoded.height;
         _videoReady = false;
+        _isUploadingMedia = true;
+        _uploadProgress = 0;
       });
-    } else {
-      final ctrl = VideoPlayerController.file(file);
-      await ctrl.initialize();
-      setState(() {
-        _selectedMedia = file;
-        _mediaType = 'video';
-        _aspectRatio = ctrl.value.aspectRatio;
-        _videoCtrl = ctrl;
-        _videoReady = true;
-      });
-      ctrl.setLooping(true);
-      ctrl.play();
+      unawaited(_uploadSelectedMedia(file, mediaType: 'image'));
+      return;
     }
+
+    final ctrl = VideoPlayerController.file(file);
+    await ctrl.initialize();
+    ctrl
+      ..setLooping(true)
+      ..play();
+
+    setState(() {
+      _selectedMedia = file;
+      _uploadedMedia = null;
+      _mediaType = 'video';
+      _aspectRatio = ctrl.value.aspectRatio;
+      _videoCtrl = ctrl;
+      _videoReady = true;
+      _isUploadingMedia = true;
+      _uploadProgress = 0;
+    });
+    unawaited(_uploadSelectedMedia(file, mediaType: 'video'));
+  }
+
+  Future<void> _cropImage() async {
+    if (_selectedMedia == null || _mediaType != 'image') return;
+    final cropped = await ImageCropper().cropImage(
+      sourcePath: _selectedMedia!.path,
+      uiSettings: [
+        AndroidUiSettings(
+          toolbarTitle: 'Recadrer',
+          toolbarColor: _kBlue,
+          toolbarWidgetColor: Colors.white,
+          initAspectRatio: CropAspectRatioPreset.original,
+          lockAspectRatio: false,
+        ),
+        IOSUiSettings(title: 'Recadrer'),
+      ],
+    );
+    if (cropped == null || !mounted) return;
+
+    final file = File(cropped.path);
+    final bytes = await file.readAsBytes();
+    final decoded = await decodeImageFromList(bytes);
+    setState(() {
+      _selectedMedia = file;
+      _uploadedMedia = null;
+      _aspectRatio = decoded.width / decoded.height;
+      _isUploadingMedia = true;
+      _uploadProgress = 0;
+    });
+    unawaited(_uploadSelectedMedia(file, mediaType: 'image'));
+  }
+
+  void _editOverlayText() {
+    setState(() {
+      _isEditingOverlayText = true;
+      if (_overlayTextCtrl.text.trim().isEmpty) {
+        _overlayTextX = 0.5;
+        _overlayTextY = 0.42;
+      }
+    });
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      _overlayTextFocusNode.requestFocus();
+    });
+  }
+
+  void _finishOverlayTextEditing() {
+    FocusScope.of(context).unfocus();
+    setState(() {
+      _overlayTextCtrl.text = _overlayTextCtrl.text.trim();
+      _isEditingOverlayText = false;
+    });
   }
 
   void _clearMedia() {
+    unawaited(_discardPendingUploadedMedia());
     _videoCtrl?.dispose();
     setState(() {
       _selectedMedia = null;
+      _uploadedMedia = null;
       _mediaType = '';
       _aspectRatio = null;
       _videoCtrl = null;
       _videoReady = false;
+      _isUploadingMedia = false;
+      _uploadProgress = 0;
+      _overlayTextCtrl.clear();
+      _isEditingOverlayText = false;
+      _overlayTextX = 0.5;
+      _overlayTextY = 0.42;
+      _overlayTextScale = 1;
+      _overlayFontIndex = 0;
     });
   }
 
-  // ── Publish ───────────────────────────────────────────────────────────────
+  Future<void> _uploadSelectedMedia(
+    File file, {
+    required String mediaType,
+  }) async {
+    try {
+      final category = mediaType == 'video' ? 'story-video' : 'story-image';
+      final uploaded = await VpsMediaService.uploadFile(
+        file: file,
+        category: category,
+        folder: 'stories/${widget.profile.uid}',
+        onProgress: (progress) {
+          if (!mounted || _selectedMedia?.path != file.path) return;
+          setState(() => _uploadProgress = progress.clamp(0, 1));
+        },
+      );
+      if (!mounted || _selectedMedia?.path != file.path) return;
+      setState(() {
+        _uploadedMedia = uploaded;
+        _isUploadingMedia = false;
+        _uploadProgress = 1;
+      });
+    } catch (_) {
+      if (!mounted || _selectedMedia?.path != file.path) return;
+      setState(() {
+        _isUploadingMedia = false;
+        _uploadProgress = 0;
+      });
+      _snack("Impossible d'envoyer le média pour le moment.");
+    }
+  }
+
+  Future<void> _discardPendingUploadedMedia() async {
+    final fileId = _uploadedMedia?.fileId.trim() ?? '';
+    if (fileId.isEmpty) return;
+    try {
+      await VpsMediaService.deleteFiles([fileId]);
+    } catch (_) {}
+  }
 
   Future<void> _publish() async {
     if (_selectedMedia == null) {
-      _snack('Veuillez ajouter une photo ou une vidéo.');
+      _snack('Veuillez ajouter une photo ou une video.');
       return;
     }
     if (widget.profile.specialties.isEmpty) {
       _snack(
-        'Ajoutez une spécialité à votre profil avant de publier une story.',
+        'Ajoutez une specialite a votre profil avant de publier une story.',
       );
       return;
     }
     if (_captionCtrl.text.trim().length > 200) {
-      _snack('La légende ne peut pas dépasser 200 caractères.');
+      _snack('La legende ne peut pas depasser 200 caracteres.');
+      return;
+    }
+    if (_isUploadingMedia || _uploadedMedia == null) {
+      _snack("Patientez pendant l'envoi du média.");
       return;
     }
 
-    setState(() {
-      _isPublishing = true;
-      _uploadProgress = 0.0;
-    });
+    setState(() => _isPublishing = true);
     try {
+      await _videoCtrl?.pause();
       await _storyService.publishStory(
         workerName: widget.profile.username,
         workerDepartment: widget.profile.department,
@@ -159,50 +307,39 @@ class _AddWorkerStoryScreenState extends State<AddWorkerStoryScreen> {
         isAvailable: widget.profile.isAvailable,
         mediaFile: _selectedMedia!,
         mediaType: _mediaType,
-        caption: _captionCtrl.text,
-        visibility: _visibility,
-        onProgress: (p) {
-          if (mounted) setState(() => _uploadProgress = p);
-        },
-        overlayText: _overlayText,
-        overlayTextX: _textOffset.dx,
-        overlayTextY: _textOffset.dy,
+        caption: _captionCtrl.text.trim(),
+        visibility: _selectedVisibility.label,
+        visibilityKey: _selectedVisibility.key,
+        uploadedMedia: _uploadedMedia,
+        overlayText: _overlayTextCtrl.text.trim(),
+        overlayTextX: _overlayTextX,
+        overlayTextY: _overlayTextY,
       );
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text('Story publiée avec succès.'),
-            backgroundColor: Color(0xFF16A34A),
-          ),
-        );
-        Navigator.pop(context);
-      }
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Story publiee avec succes.'),
+          backgroundColor: Color(0xFF16A34A),
+        ),
+      );
+      Navigator.pop(context);
     } catch (e) {
-      debugPrint('Story publish UI error: $e');
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Échec de l\'envoi: $e')),
-        );
-      }
+      if (!mounted) return;
+      _snack('Echec de l envoi: $e');
     } finally {
       if (mounted) {
-        setState(() {
-          _isPublishing = false;
-          _uploadProgress = 0.0;
-        });
+        setState(() => _isPublishing = false);
       }
     }
   }
 
-  void _snack(String msg) {
-    ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(msg)));
+  void _snack(String message) {
+    ScaffoldMessenger.of(
+      context,
+    ).showSnackBar(SnackBar(content: Text(message)));
   }
 
-  // ── Aspect ratio helpers ──────────────────────────────────────────────────
-
-  bool get _isVertical => (_aspectRatio ?? 1.0) < 0.75;
-
-  // ── Build ─────────────────────────────────────────────────────────────────
+  bool get _isPortraitStoryMedia => (_aspectRatio ?? 1) <= (9 / 16) + 0.02;
 
   @override
   Widget build(BuildContext context) {
@@ -212,28 +349,157 @@ class _AddWorkerStoryScreenState extends State<AddWorkerStoryScreen> {
     );
   }
 
-  // ── State 1: Empty (no media) ─────────────────────────────────────────────
-
   Widget _buildEmptyState() {
+    return SafeArea(
+      child: Column(
+        children: [
+          _buildTopBar(mediaSelected: false),
+          Expanded(
+            child: Center(
+              child: GestureDetector(
+                onTap: _pickMedia,
+                child: Container(
+                  margin: const EdgeInsets.symmetric(horizontal: 28),
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 28,
+                    vertical: 40,
+                  ),
+                  decoration: BoxDecoration(
+                    color: Colors.white,
+                    borderRadius: BorderRadius.circular(28),
+                    border: Border.all(color: _kBorder),
+                    boxShadow: const [
+                      BoxShadow(
+                        color: Color(0x120F63FF),
+                        blurRadius: 20,
+                        offset: Offset(0, 10),
+                      ),
+                    ],
+                  ),
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Container(
+                        width: 76,
+                        height: 76,
+                        decoration: BoxDecoration(
+                          color: const Color(0xFFEFF6FF),
+                          borderRadius: BorderRadius.circular(24),
+                        ),
+                        child: const Icon(
+                          LucideIcons.imagePlus,
+                          color: _kBlue,
+                          size: 34,
+                        ),
+                      ),
+                      const SizedBox(height: 20),
+                      const Text(
+                        'Ajoutez une photo ou une video',
+                        textAlign: TextAlign.center,
+                        style: TextStyle(
+                          color: Color(0xFF0F172A),
+                          fontSize: 18,
+                          fontWeight: FontWeight.w800,
+                        ),
+                      ),
+                      const SizedBox(height: 8),
+                      const Text(
+                        'Les stories verticales prennent tout l ecran et les medias sont envoyes directement en fichier complet.',
+                        textAlign: TextAlign.center,
+                        style: TextStyle(
+                          color: _kMuted,
+                          fontSize: 13.5,
+                          height: 1.5,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            ),
+          ),
+          _buildBottomControls(),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildPreviewState() {
     return Stack(
       fit: StackFit.expand,
       children: [
-        // Dark gradient background
-        Container(
-          decoration: const BoxDecoration(
-            gradient: LinearGradient(
-              colors: [Color(0xFF0A0E1A), Color(0xFF0F1828)],
-              begin: Alignment.topCenter,
-              end: Alignment.bottomCenter,
+        _buildMediaBackdrop(),
+        _buildMediaPreview(),
+        if (_overlayTextCtrl.text.trim().isNotEmpty || _isEditingOverlayText)
+          _buildDraggableOverlayText(),
+        Positioned.fill(
+          child: IgnorePointer(
+            child: DecoratedBox(
+              decoration: BoxDecoration(
+                gradient: LinearGradient(
+                  begin: Alignment.topCenter,
+                  end: Alignment.bottomCenter,
+                  colors: [
+                    Colors.black.withValues(alpha: 0.48),
+                    Colors.transparent,
+                    Colors.transparent,
+                    Colors.black.withValues(alpha: 0.62),
+                  ],
+                  stops: const [0, 0.18, 0.65, 1],
+                ),
+              ),
             ),
           ),
         ),
         SafeArea(
           child: Column(
             children: [
-              _buildTopBar(mediaSelected: false),
-              _buildRightTools(),
-              Expanded(child: _buildUploadBox()),
+              _buildTopBar(mediaSelected: true),
+              const SizedBox(height: 10),
+              Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 16),
+                child: Row(
+                  mainAxisAlignment: MainAxisAlignment.end,
+                  children: [
+                    if (_mediaType == 'image') ...[
+                      _storyToolBtn(
+                        icon: LucideIcons.crop,
+                        label: 'Recadrer',
+                        onTap: _cropImage,
+                      ),
+                      const SizedBox(width: 10),
+                    ],
+                    _storyToolBtn(
+                      icon: _isEditingOverlayText
+                          ? LucideIcons.check
+                          : LucideIcons.type,
+                      label: _isEditingOverlayText
+                          ? 'Terminer'
+                          : _overlayTextCtrl.text.trim().isEmpty
+                          ? 'Texte'
+                          : 'Modifier le texte',
+                      onTap: _isEditingOverlayText
+                          ? _finishOverlayTextEditing
+                          : _editOverlayText,
+                    ),
+                    if (_overlayTextCtrl.text.trim().isNotEmpty ||
+                        _isEditingOverlayText) ...[
+                      const SizedBox(width: 10),
+                      _storyToolBtn(
+                        icon: LucideIcons.caseSensitive,
+                        label: 'Police',
+                        onTap: () {
+                          setState(() {
+                            _overlayFontIndex =
+                                (_overlayFontIndex + 1) % _kOverlayFonts.length;
+                          });
+                        },
+                      ),
+                    ],
+                  ],
+                ),
+              ),
+              const Spacer(),
               _buildBottomControls(),
             ],
           ),
@@ -242,265 +508,148 @@ class _AddWorkerStoryScreenState extends State<AddWorkerStoryScreen> {
     );
   }
 
-  Widget _buildUploadBox() {
-    return Center(
-      child: GestureDetector(
-        onTap: _pickMedia,
-        child: Container(
-          margin: const EdgeInsets.symmetric(horizontal: 32),
-          constraints: const BoxConstraints(maxHeight: 420),
-          decoration: BoxDecoration(
-            borderRadius: BorderRadius.circular(20),
-            border: Border.all(color: _kBlue, width: 2),
-          ),
-          child: ClipRRect(
-            borderRadius: BorderRadius.circular(19),
-            child: CustomPaint(
-              painter: _DashedBorderPainter(),
-              child: Container(
-                color: Colors.white.withValues(alpha: 0.04),
-                padding: const EdgeInsets.symmetric(
-                  horizontal: 28,
-                  vertical: 40,
-                ),
-                child: Column(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    Container(
-                      width: 72,
-                      height: 72,
-                      decoration: BoxDecoration(
-                        color: Colors.white.withValues(alpha: 0.10),
-                        shape: BoxShape.circle,
-                      ),
-                      child: const Icon(
-                        LucideIcons.imagePlus,
-                        color: _kBlue,
-                        size: 32,
-                      ),
-                    ),
-                    const SizedBox(height: 20),
-                    const Text(
-                      'Ajoutez une photo ou une vidéo',
-                      textAlign: TextAlign.center,
-                      style: TextStyle(
-                        color: _kBlue,
-                        fontSize: 15,
-                        fontWeight: FontWeight.w800,
-                      ),
-                    ),
-                    const SizedBox(height: 8),
-                    Text(
-                      'Appuyez pour sélectionner dans la galerie\nou glissez-déposez ici',
-                      textAlign: TextAlign.center,
-                      style: TextStyle(
-                        color: Colors.white.withValues(alpha: 0.55),
-                        fontSize: 13,
-                        height: 1.5,
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-            ),
-          ),
-        ),
-      ),
-    );
-  }
+  Widget _buildMediaBackdrop() {
+    if (_selectedMedia == null) return const SizedBox.shrink();
+    final shouldBackdrop = !_isPortraitStoryMedia;
+    if (!shouldBackdrop) {
+      return Container(color: Colors.black);
+    }
 
-  // ── State 2: Media preview ────────────────────────────────────────────────
-
-  Widget _buildPreviewState() {
-    return Scaffold(
-      backgroundColor: Colors.black,
-      body: Stack(
-        fit: StackFit.expand,
-        children: [
-          // Full-screen media
-          _buildFullScreenMedia(),
-          // Overlaid controls
-          SafeArea(
-            child: Stack(
-              children: [
-                // Top bar
-                Positioned(
-                  top: 0, left: 0, right: 0,
-                  child: _buildTopBar(mediaSelected: true),
-                ),
-                // Right tools
-                Positioned(
-                  top: 60, right: 12,
-                  child: _buildRightTools(),
-                ),
-                // Caption + bottom controls
-                Positioned(
-                  bottom: 0, left: 0, right: 0,
-                  child: Column(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      _buildCaptionOverlay(),
-                      _buildBottomControls(),
-                    ],
-                  ),
-                ),
-              ],
-            ),
-          ),
-          // Draggable overlay text
-          if (_overlayText.isNotEmpty && !_editingText)
-            Positioned(
-              left: (_textOffset.dx * MediaQuery.of(context).size.width) - 50,
-              top: (_textOffset.dy * MediaQuery.of(context).size.height) - 20,
-              child: GestureDetector(
-                onTap: () => setState(() {
-                  _textController.text = _overlayText;
-                  _editingText = true;
-                }),
-                onPanUpdate: (d) => setState(() {
-                  final w = MediaQuery.of(context).size.width;
-                  final h = MediaQuery.of(context).size.height;
-                  _textOffset = Offset(
-                    (_textOffset.dx + d.delta.dx / w).clamp(0.1, 0.9),
-                    (_textOffset.dy + d.delta.dy / h).clamp(0.1, 0.9),
-                  );
-                }),
-                child: Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
-                  decoration: BoxDecoration(
-                    color: Colors.black54,
-                    borderRadius: BorderRadius.circular(10),
-                  ),
-                  child: Text(
-                    _overlayText,
-                    style: const TextStyle(
-                      color: Colors.white,
-                      fontSize: 24,
-                      fontWeight: FontWeight.bold,
-                    ),
-                    textAlign: TextAlign.center,
-                  ),
-                ),
-              ),
-            ),
-          // Text editor overlay
-          if (_editingText)
-            Container(
-              color: Colors.black.withValues(alpha: 0.8),
-              child: Stack(
-                children: [
-                  Center(
-                    child: Padding(
-                      padding: const EdgeInsets.symmetric(horizontal: 24),
-                      child: TextField(
-                        controller: _textController,
-                        autofocus: true,
-                        maxLines: null,
-                        textAlign: TextAlign.center,
-                        cursorColor: Colors.white,
-                        style: const TextStyle(
-                          color: Colors.white,
-                          fontSize: 24,
-                          fontWeight: FontWeight.bold,
-                        ),
-                        decoration: const InputDecoration(
-                          border: InputBorder.none,
-                          hintText: 'Tapez votre texte...',
-                          hintStyle: TextStyle(color: Colors.white54),
-                        ),
-                      ),
-                    ),
-                  ),
-                  Positioned(
-                    top: MediaQuery.of(context).padding.top + 12,
-                    right: 16,
-                    child: GestureDetector(
-                      onTap: () => setState(() {
-                        _overlayText = _textController.text.trim();
-                        _editingText = false;
-                      }),
-                      child: Container(
-                        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-                        decoration: BoxDecoration(
-                          color: const Color(0xFF0F63FF),
-                          borderRadius: BorderRadius.circular(20),
-                        ),
-                        child: const Text(
-                          'Terminé',
-                          style: TextStyle(
-                            color: Colors.white,
-                            fontWeight: FontWeight.w700,
-                            fontSize: 14,
-                          ),
-                        ),
-                      ),
-                    ),
-                  ),
-                ],
-              ),
-            ),
-        ],
-      ),
-    );
-  }
-
-  Widget _buildFullScreenMedia() {
     if (_mediaType == 'image') {
       return Image.file(
         _selectedMedia!,
-        fit: _isVertical ? BoxFit.cover : BoxFit.contain,
-        width: double.infinity,
-        height: double.infinity,
+        fit: BoxFit.cover,
+        color: Colors.black.withValues(alpha: 0.28),
+        colorBlendMode: BlendMode.darken,
       );
     }
-    if (_mediaType == 'video') {
-      if (!_videoReady) {
-        return const Center(child: CircularProgressIndicator(color: Colors.white));
-      }
+
+    if (_mediaType == 'video' && _videoReady && _videoCtrl != null) {
       return FittedBox(
-        fit: _isVertical ? BoxFit.cover : BoxFit.contain,
+        fit: BoxFit.cover,
         child: SizedBox(
           width: _videoCtrl!.value.size.width,
           height: _videoCtrl!.value.size.height,
-          child: VideoPlayer(_videoCtrl!),
+          child: Opacity(opacity: 0.28, child: VideoPlayer(_videoCtrl!)),
         ),
       );
     }
+
+    return Container(color: Colors.black);
+  }
+
+  Widget _buildMediaPreview() {
+    final fit = _isPortraitStoryMedia ? BoxFit.cover : BoxFit.contain;
+
+    if (_mediaType == 'image') {
+      return Image.file(_selectedMedia!, fit: fit);
+    }
+
+    if (_mediaType == 'video') {
+      if (!_videoReady || _videoCtrl == null) {
+        return const Center(
+          child: CircularProgressIndicator(color: Colors.white),
+        );
+      }
+      return Center(
+        child: FittedBox(
+          fit: fit,
+          child: SizedBox(
+            width: _videoCtrl!.value.size.width,
+            height: _videoCtrl!.value.size.height,
+            child: VideoPlayer(_videoCtrl!),
+          ),
+        ),
+      );
+    }
+
     return const SizedBox.shrink();
   }
 
-  Widget _buildCaptionOverlay() {
-    return Container(
-      decoration: const BoxDecoration(
-        gradient: LinearGradient(
-          begin: Alignment.bottomCenter,
-          end: Alignment.topCenter,
-          colors: [Colors.black87, Colors.transparent],
-        ),
-      ),
-      padding: const EdgeInsets.fromLTRB(12, 32, 12, 8),
-      child: TextField(
-        controller: _captionCtrl,
-        maxLength: 200,
-        style: const TextStyle(color: Colors.white, fontSize: 14),
-        decoration: InputDecoration(
-          hintText: 'Ajouter une légende...',
-          hintStyle: TextStyle(color: Colors.white.withValues(alpha: 0.60), fontSize: 14),
-          prefixIcon: const Icon(LucideIcons.pencil, color: Colors.white60, size: 16),
-          border: InputBorder.none,
-          contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
-          counterStyle: const TextStyle(color: Colors.white38, fontSize: 11),
-        ),
-      ),
+  Widget _buildDraggableOverlayText() {
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final safeLeft = 20.0;
+        final safeTop = 110.0;
+        final safeRight = constraints.maxWidth - 20;
+        final safeBottom = constraints.maxHeight - 220;
+        final left = _overlayTextX * constraints.maxWidth;
+        final top = _overlayTextY * constraints.maxHeight;
+        final clampedLeft = left.clamp(safeLeft, safeRight);
+        final clampedTop = top.clamp(safeTop, safeBottom);
+
+        return Positioned(
+          left: clampedLeft - 110,
+          top: clampedTop - 28,
+          child: GestureDetector(
+            onScaleStart: (_) {
+              _overlayTextScaleStart = _overlayTextScale;
+            },
+            onScaleUpdate: (details) {
+              final nextLeft = (clampedLeft + details.focalPointDelta.dx).clamp(
+                safeLeft,
+                safeRight,
+              );
+              final nextTop = (clampedTop + details.focalPointDelta.dy).clamp(
+                safeTop,
+                safeBottom,
+              );
+              setState(() {
+                _overlayTextX = nextLeft / constraints.maxWidth;
+                _overlayTextY = nextTop / constraints.maxHeight;
+                _overlayTextScale = (_overlayTextScaleStart * details.scale)
+                    .clamp(0.7, 2.8);
+              });
+            },
+            onTap: _isEditingOverlayText ? null : _editOverlayText,
+            child: Container(
+              constraints: const BoxConstraints(maxWidth: 220),
+              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+              decoration: BoxDecoration(
+                color: Colors.black.withValues(alpha: 0.28),
+                borderRadius: BorderRadius.circular(20),
+              ),
+              child: _isEditingOverlayText
+                  ? ConstrainedBox(
+                      constraints: const BoxConstraints(maxWidth: 220),
+                      child: TextField(
+                        controller: _overlayTextCtrl,
+                        focusNode: _overlayTextFocusNode,
+                        maxLength: 120,
+                        maxLines: 3,
+                        textAlign: TextAlign.center,
+                        cursorColor: Colors.white,
+                        style: _overlayTextStyle(),
+                        decoration: const InputDecoration(
+                          hintText: 'Tapez votre texte',
+                          hintStyle: TextStyle(
+                            color: Colors.white70,
+                            fontSize: 22,
+                            fontWeight: FontWeight.w700,
+                          ),
+                          border: InputBorder.none,
+                          counterText: '',
+                          isCollapsed: true,
+                        ),
+                        onChanged: (_) => setState(() {}),
+                        onSubmitted: (_) => _finishOverlayTextEditing(),
+                      ),
+                    )
+                  : Text(
+                      _overlayTextCtrl.text.trim(),
+                      textAlign: TextAlign.center,
+                      style: _overlayTextStyle(),
+                    ),
+            ),
+          ),
+        );
+      },
     );
   }
 
-
-  // ── Shared UI pieces ──────────────────────────────────────────────────────
-
   Widget _buildTopBar({required bool mediaSelected}) {
     return Padding(
-      padding: const EdgeInsets.fromLTRB(16, 10, 16, 0),
+      padding: const EdgeInsets.fromLTRB(16, 12, 16, 0),
       child: Row(
         children: [
           _storyIconBtn(
@@ -518,134 +667,129 @@ class _AddWorkerStoryScreenState extends State<AddWorkerStoryScreen> {
     );
   }
 
-  Widget _buildRightTools() {
-    if (_selectedMedia == null) return const SizedBox.shrink();
-    return Align(
-      alignment: Alignment.centerRight,
-      child: Padding(
-        padding: const EdgeInsets.only(right: 12, top: 12),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            _storyToolBtn(
-              icon: LucideIcons.type,
-              label: 'Texte',
-              onTap: () => setState(() => _editingText = true),
-            ),
-            if (_mediaType == 'image') ...[
-              const SizedBox(height: 12),
-              _storyToolBtn(
-                icon: LucideIcons.crop,
-                label: 'Recadrer',
-                onTap: () async {
-                  if (_selectedMedia == null || _mediaType != 'image') return;
-                  final cropped = await ImageCropper().cropImage(
-                    sourcePath: _selectedMedia!.path,
-                    uiSettings: [
-                      AndroidUiSettings(
-                        toolbarTitle: 'Recadrer',
-                        toolbarColor: const Color(0xFF0F63FF),
-                        toolbarWidgetColor: Colors.white,
-                        initAspectRatio: CropAspectRatioPreset.original,
-                        lockAspectRatio: false,
-                      ),
-                      IOSUiSettings(title: 'Recadrer'),
-                    ],
-                  );
-                  if (cropped != null && mounted) {
-                    setState(() => _selectedMedia = File(cropped.path));
-                  }
-                },
-              ),
-            ],
-          ],
-        ),
-      ),
-    );
-  }
-
   Widget _buildBottomControls() {
     return Container(
+      width: double.infinity,
+      margin: const EdgeInsets.fromLTRB(16, 0, 16, 0),
       padding: EdgeInsets.fromLTRB(
         16,
-        10,
         16,
-        20 + MediaQuery.of(context).viewPadding.bottom,
+        16,
+        16 + MediaQuery.of(context).viewPadding.bottom,
       ),
       decoration: BoxDecoration(
-        gradient: LinearGradient(
-          begin: Alignment.topCenter,
-          end: Alignment.bottomCenter,
-          colors: [
-            Colors.black.withValues(alpha: 0.08),
-            Colors.black.withValues(alpha: 0.88),
-          ],
-        ),
+        color: _selectedMedia == null ? Colors.transparent : Colors.white,
+        borderRadius: _selectedMedia == null
+            ? BorderRadius.zero
+            : const BorderRadius.vertical(top: Radius.circular(26)),
       ),
       child: Column(
         mainAxisSize: MainAxisSize.min,
         children: [
-          // Specialty + visibility chips
-          Row(
-            children: [
-              Expanded(child: _buildSpecialtyChip()),
-              const SizedBox(width: 10),
-              Expanded(child: _buildVisibilityChip()),
-            ],
-          ),
-          const SizedBox(height: 14),
-          // Upload progress indicator
-          if (_isPublishing) ...[
-            LinearProgressIndicator(
-              value: _uploadProgress,
-              color: _kBlue,
-              backgroundColor: _kBlue.withValues(alpha: 0.15),
-              minHeight: 4,
-              borderRadius: BorderRadius.circular(2),
-            ),
-            const SizedBox(height: 6),
-            Text(
-              'Publication en cours… ${(_uploadProgress * 100).toInt()}%',
-              style: const TextStyle(
-                color: _kMuted,
-                fontSize: 12,
-              ),
-            ),
-            const SizedBox(height: 10),
-          ],
-          // Publish button
-          SizedBox(
-            width: double.infinity,
-            child: ElevatedButton(
-              onPressed: _isPublishing ? null : _publish,
-              style: ElevatedButton.styleFrom(
-                backgroundColor: _kBlue,
-                foregroundColor: Colors.white,
-                disabledBackgroundColor: _kBlue.withValues(alpha: 0.6),
-                elevation: 0,
-                padding: const EdgeInsets.symmetric(vertical: 16),
-                shape: RoundedRectangleBorder(
-                  borderRadius: BorderRadius.circular(18),
+          if (_selectedMedia != null) ...[
+            if (_isUploadingMedia) ...[
+              Container(
+                width: double.infinity,
+                padding: const EdgeInsets.fromLTRB(14, 12, 14, 12),
+                decoration: BoxDecoration(
+                  color: Colors.white,
+                  borderRadius: BorderRadius.circular(20),
+                  border: Border.all(color: _kBorder),
                 ),
-              ),
-              child: _isPublishing
-                  ? const SizedBox(
-                      width: 20,
-                      height: 20,
-                      child: CircularProgressIndicator(
-                        color: Colors.white,
-                        strokeWidth: 2.5,
-                      ),
-                    )
-                  : const Text(
-                      'Publier la story',
-                      style: TextStyle(
-                        fontSize: 15,
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      _mediaType == 'video'
+                          ? 'Envoi de la vidéo au VPS...'
+                          : 'Envoi de la photo au VPS...',
+                      style: const TextStyle(
+                        color: Color(0xFF0F172A),
+                        fontSize: 13.5,
                         fontWeight: FontWeight.w800,
                       ),
                     ),
+                    const SizedBox(height: 10),
+                    ClipRRect(
+                      borderRadius: BorderRadius.circular(999),
+                      child: LinearProgressIndicator(
+                        minHeight: 7,
+                        value: _uploadProgress <= 0 ? null : _uploadProgress,
+                        backgroundColor: const Color(0xFFE5EEFF),
+                        valueColor: const AlwaysStoppedAnimation<Color>(_kBlue),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              const SizedBox(height: 12),
+            ],
+            Container(
+              padding: const EdgeInsets.fromLTRB(14, 12, 14, 8),
+              decoration: BoxDecoration(
+                color: Colors.white,
+                borderRadius: BorderRadius.circular(22),
+                border: Border.all(color: _kBorder),
+              ),
+              child: TextField(
+                controller: _captionCtrl,
+                maxLength: 200,
+                style: const TextStyle(color: Color(0xFF0F172A), fontSize: 14),
+                decoration: const InputDecoration(
+                  hintText: 'Ajouter une legende',
+                  hintStyle: TextStyle(color: _kMuted),
+                  prefixIcon: Icon(
+                    LucideIcons.pencilLine,
+                    color: _kBlue,
+                    size: 18,
+                  ),
+                  border: InputBorder.none,
+                  counterText: '',
+                ),
+              ),
             ),
-          ),
+            const SizedBox(height: 12),
+            Row(
+              children: [
+                Expanded(child: _buildSpecialtyChip()),
+                const SizedBox(width: 10),
+                Expanded(child: _buildVisibilityChip()),
+              ],
+            ),
+            const SizedBox(height: 14),
+            SizedBox(
+              width: double.infinity,
+              child: ElevatedButton(
+                onPressed: (_isPublishing || _isUploadingMedia) ? null : _publish,
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: _kBlue,
+                  foregroundColor: Colors.white,
+                  disabledBackgroundColor: _kBlue.withValues(alpha: 0.6),
+                  elevation: 0,
+                  padding: const EdgeInsets.symmetric(vertical: 16),
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(18),
+                  ),
+                ),
+                child: _isPublishing
+                    ? const SizedBox(
+                        width: 20,
+                        height: 20,
+                        child: CircularProgressIndicator(
+                          color: Colors.white,
+                          strokeWidth: 2.4,
+                        ),
+                      )
+                    : const Text(
+                        'Publier la story',
+                        style: TextStyle(
+                          fontSize: 15,
+                          fontWeight: FontWeight.w800,
+                        ),
+                      ),
+              ),
+            ),
+          ],
         ],
       ),
     );
@@ -656,7 +800,7 @@ class _AddWorkerStoryScreenState extends State<AddWorkerStoryScreen> {
     if (specs.isEmpty) {
       return _dropdownChip(
         icon: LucideIcons.wrench,
-        label: 'Aucune spécialité',
+        label: 'Aucune specialite',
         onTap: null,
       );
     }
@@ -668,12 +812,14 @@ class _AddWorkerStoryScreenState extends State<AddWorkerStoryScreen> {
           context: context,
           backgroundColor: Colors.transparent,
           builder: (_) => _PickerSheet(
-            title: 'Spécialité',
+            title: 'Specialite',
             options: specs,
             selected: _selectedSpecialty,
           ),
         );
-        if (picked != null) setState(() => _selectedSpecialty = picked);
+        if (picked != null && mounted) {
+          setState(() => _selectedSpecialty = picked);
+        }
       },
     );
   }
@@ -681,18 +827,16 @@ class _AddWorkerStoryScreenState extends State<AddWorkerStoryScreen> {
   Widget _buildVisibilityChip() {
     return _dropdownChip(
       icon: LucideIcons.users,
-      label: _visibility,
+      label: _selectedVisibility.label,
       onTap: () async {
-        final picked = await showModalBottomSheet<String>(
+        final picked = await showModalBottomSheet<_StoryVisibilityOption>(
           context: context,
           backgroundColor: Colors.transparent,
-          builder: (_) => _PickerSheet(
-            title: 'Visibilité',
-            options: _kVisibilityOptions,
-            selected: _visibility,
-          ),
+          builder: (_) => _VisibilityPickerSheet(selected: _selectedVisibility),
         );
-        if (picked != null) setState(() => _visibility = picked);
+        if (picked != null && mounted) {
+          setState(() => _selectedVisibility = picked);
+        }
       },
     );
   }
@@ -709,7 +853,7 @@ class _AddWorkerStoryScreenState extends State<AddWorkerStoryScreen> {
         decoration: BoxDecoration(
           color: Colors.white,
           borderRadius: BorderRadius.circular(14),
-          border: Border.all(color: const Color(0xFFE6EEFF)),
+          border: Border.all(color: _kBorder),
         ),
         child: Row(
           children: [
@@ -743,26 +887,25 @@ class _AddWorkerStoryScreenState extends State<AddWorkerStoryScreen> {
     return GestureDetector(
       onTap: onTap,
       child: Container(
-        width: 42,
-        height: 42,
+        width: 46,
+        height: 46,
         decoration: BoxDecoration(
           color: disabled
-              ? Colors.black.withValues(alpha: 0.22)
+              ? Colors.white.withValues(alpha: 0.72)
               : Colors.white.withValues(alpha: 0.96),
           borderRadius: BorderRadius.circular(14),
-          boxShadow: disabled
-              ? null
-              : [
-                  BoxShadow(
-                    color: Colors.black.withValues(alpha: 0.18),
-                    blurRadius: 8,
-                    offset: const Offset(0, 2),
-                  ),
-                ],
+          border: Border.all(color: _kBorder),
+          boxShadow: const [
+            BoxShadow(
+              color: Color(0x26000000),
+              blurRadius: 16,
+              offset: Offset(0, 6),
+            ),
+          ],
         ),
         child: Icon(
           icon,
-          color: disabled ? Colors.white54 : const Color(0xFF0F172A),
+          color: disabled ? const Color(0xFF94A3B8) : const Color(0xFF0F172A),
           size: 18,
         ),
       ),
@@ -776,43 +919,50 @@ class _AddWorkerStoryScreenState extends State<AddWorkerStoryScreen> {
   }) {
     return GestureDetector(
       onTap: onTap,
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Container(
-            width: 44,
-            height: 44,
-            decoration: BoxDecoration(
-              color: Colors.white.withValues(alpha: 0.96),
-              shape: BoxShape.circle,
-              boxShadow: [
-                BoxShadow(
-                  color: Colors.black.withValues(alpha: 0.18),
-                  blurRadius: 8,
-                  offset: const Offset(0, 2),
-                ),
-              ],
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+        decoration: BoxDecoration(
+          color: Colors.white,
+          borderRadius: BorderRadius.circular(16),
+          border: Border.all(color: _kBorder),
+        ),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(icon, color: _kBlue, size: 16),
+            const SizedBox(width: 8),
+            Text(
+              label,
+              style: const TextStyle(
+                color: Color(0xFF0F172A),
+                fontSize: 12.5,
+                fontWeight: FontWeight.w700,
+              ),
             ),
-            child: Icon(icon, color: const Color(0xFF0F172A), size: 20),
-          ),
-          const SizedBox(height: 4),
-          Text(
-            label,
-            style: const TextStyle(
-              color: Colors.white,
-              fontSize: 11,
-              fontWeight: FontWeight.w600,
-            ),
-          ),
-        ],
+          ],
+        ),
       ),
+    );
+  }
+
+  TextStyle _overlayTextStyle() {
+    final style =
+        _kOverlayFonts[_overlayFontIndex](24 * _overlayTextScale, Colors.white);
+    return style.copyWith(
+      shadows: const [
+        Shadow(
+          color: Colors.black54,
+          blurRadius: 12,
+          offset: Offset(0, 3),
+        ),
+      ],
     );
   }
 }
 
-// ── Media picker bottom sheet ─────────────────────────────────────────────────
-
 class _MediaPickerSheet extends StatelessWidget {
+  const _MediaPickerSheet();
+
   @override
   Widget build(BuildContext context) {
     return Container(
@@ -834,7 +984,7 @@ class _MediaPickerSheet extends StatelessWidget {
             ),
           ),
           const Text(
-            'Ajouter un média',
+            'Ajouter un media',
             style: TextStyle(
               fontSize: 16,
               fontWeight: FontWeight.w800,
@@ -852,7 +1002,7 @@ class _MediaPickerSheet extends StatelessWidget {
           _sheetOption(
             context,
             icon: LucideIcons.video,
-            label: 'Vidéo (15 s max)',
+            label: 'Video (15 s max)',
             value: 'video',
           ),
         ],
@@ -873,7 +1023,7 @@ class _MediaPickerSheet extends StatelessWidget {
         decoration: BoxDecoration(
           color: const Color(0xFFF7FAFF),
           borderRadius: BorderRadius.circular(16),
-          border: Border.all(color: const Color(0xFFE6EEFF)),
+          border: Border.all(color: _kBorder),
         ),
         child: Row(
           children: [
@@ -901,8 +1051,6 @@ class _MediaPickerSheet extends StatelessWidget {
     );
   }
 }
-
-// ── Generic picker bottom sheet ───────────────────────────────────────────────
 
 class _PickerSheet extends StatelessWidget {
   const _PickerSheet({
@@ -944,10 +1092,10 @@ class _PickerSheet extends StatelessWidget {
             ),
           ),
           const SizedBox(height: 14),
-          ...options.map((opt) {
-            final isSelected = opt == selected;
+          ...options.map((option) {
+            final isSelected = option == selected;
             return GestureDetector(
-              onTap: () => Navigator.pop(context, opt),
+              onTap: () => Navigator.pop(context, option),
               child: Container(
                 width: double.infinity,
                 margin: const EdgeInsets.only(bottom: 8),
@@ -960,15 +1108,13 @@ class _PickerSheet extends StatelessWidget {
                       ? const Color(0xFFEFF6FF)
                       : const Color(0xFFF7FAFF),
                   borderRadius: BorderRadius.circular(14),
-                  border: Border.all(
-                    color: isSelected ? _kBlue : const Color(0xFFE6EEFF),
-                  ),
+                  border: Border.all(color: isSelected ? _kBlue : _kBorder),
                 ),
                 child: Row(
                   children: [
                     Expanded(
                       child: Text(
-                        opt,
+                        option,
                         style: TextStyle(
                           color: isSelected ? _kBlue : const Color(0xFF0F172A),
                           fontSize: 13.5,
@@ -989,33 +1135,86 @@ class _PickerSheet extends StatelessWidget {
   }
 }
 
-// ── Dashed border painter ─────────────────────────────────────────────────────
+class _VisibilityPickerSheet extends StatelessWidget {
+  const _VisibilityPickerSheet({required this.selected});
 
-class _DashedBorderPainter extends CustomPainter {
+  final _StoryVisibilityOption selected;
+
   @override
-  void paint(Canvas canvas, Size size) {
-    final paint = Paint()
-      ..color = _kBlue.withValues(alpha: 0.6)
-      ..strokeWidth = 2
-      ..style = PaintingStyle.stroke;
-
-    const dashW = 8.0;
-    const gapW = 6.0;
-    final rr = RRect.fromRectAndRadius(
-      Rect.fromLTWH(0, 0, size.width, size.height),
-      const Radius.circular(20),
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.fromLTRB(20, 14, 20, 32),
+      decoration: const BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.vertical(top: Radius.circular(28)),
+      ),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Container(
+            width: 40,
+            height: 4,
+            margin: const EdgeInsets.only(bottom: 20),
+            decoration: BoxDecoration(
+              color: const Color(0xFFE2E8F0),
+              borderRadius: BorderRadius.circular(2),
+            ),
+          ),
+          const Text(
+            'Visibilite',
+            style: TextStyle(
+              fontSize: 16,
+              fontWeight: FontWeight.w800,
+              color: Color(0xFF0F172A),
+            ),
+          ),
+          const SizedBox(height: 14),
+          ..._kVisibilityOptions.map((option) {
+            final isSelected = option.key == selected.key;
+            return GestureDetector(
+              onTap: () => Navigator.pop(context, option),
+              child: Container(
+                width: double.infinity,
+                margin: const EdgeInsets.only(bottom: 8),
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 16,
+                  vertical: 14,
+                ),
+                decoration: BoxDecoration(
+                  color: isSelected
+                      ? const Color(0xFFEFF6FF)
+                      : const Color(0xFFF7FAFF),
+                  borderRadius: BorderRadius.circular(14),
+                  border: Border.all(color: isSelected ? _kBlue : _kBorder),
+                ),
+                child: Row(
+                  children: [
+                    Expanded(
+                      child: Text(
+                        option.label,
+                        style: TextStyle(
+                          color: isSelected ? _kBlue : const Color(0xFF0F172A),
+                          fontSize: 13.5,
+                          fontWeight: FontWeight.w700,
+                        ),
+                      ),
+                    ),
+                    if (isSelected)
+                      const Icon(LucideIcons.check, color: _kBlue, size: 16),
+                  ],
+                ),
+              ),
+            );
+          }),
+        ],
+      ),
     );
-    final path = Path()..addRRect(rr);
-    final metrics = path.computeMetrics();
-    for (final metric in metrics) {
-      double dist = 0;
-      while (dist < metric.length) {
-        canvas.drawPath(metric.extractPath(dist, dist + dashW), paint);
-        dist += dashW + gapW;
-      }
-    }
   }
+}
 
-  @override
-  bool shouldRepaint(covariant CustomPainter oldDelegate) => false;
+class _StoryVisibilityOption {
+  const _StoryVisibilityOption({required this.key, required this.label});
+
+  final String key;
+  final String label;
 }

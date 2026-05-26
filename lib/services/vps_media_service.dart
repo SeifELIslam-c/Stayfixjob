@@ -46,15 +46,26 @@ class VpsUploadedMedia {
 class VpsMediaService {
   VpsMediaService._();
 
-  static const String _fallbackBaseUrl = 'http://159.89.98.134:8080';
-  static const String _fallbackPublicUrl = 'http://159.89.98.134';
+  static const String _fallbackBaseUrl = 'https://159.89.98.134:8080';
+  static const String _fallbackPublicUrl = 'https://159.89.98.134';
 
   static String get _configuredBaseUrl {
     final raw =
         AppEnv.get('VPS_MEDIA_BASE_URL') ??
         AppEnv.get('VPS_BASE_URL') ??
         _fallbackBaseUrl;
-    return raw.endsWith('/') ? raw.substring(0, raw.length - 1) : raw;
+    final trimmed = raw.endsWith('/') ? raw.substring(0, raw.length - 1) : raw;
+    final parsed = Uri.tryParse(trimmed);
+    if (parsed == null) return trimmed;
+
+    final shouldUpgradeToHttps =
+        !kIsWeb &&
+        defaultTargetPlatform == TargetPlatform.iOS &&
+        parsed.scheme == 'http' &&
+        parsed.host != 'localhost' &&
+        parsed.host != '127.0.0.1';
+    if (!shouldUpgradeToHttps) return trimmed;
+    return parsed.replace(scheme: 'https').toString();
   }
 
   static Future<Map<String, String>> _authHeaders() async {
@@ -71,7 +82,9 @@ class VpsMediaService {
     required File file,
     required String category,
     String? conversationId,
+    String? folder,
     int? durationMs,
+    Map<String, String>? extraFields,
     void Function(double progress)? onProgress,
   }) async {
     final uri = Uri.parse('$_configuredBaseUrl/api/media/upload');
@@ -88,20 +101,32 @@ class VpsMediaService {
     if (conversationId != null && conversationId.trim().isNotEmpty) {
       request.fields['conversationId'] = conversationId.trim();
     }
+    if (folder != null && folder.trim().isNotEmpty) {
+      request.fields['folder'] = folder.trim();
+    }
     if (durationMs != null) {
       request.fields['durationMs'] = durationMs.toString();
+    }
+    if (extraFields != null) {
+      for (final entry in extraFields.entries) {
+        final key = entry.key.trim();
+        final value = entry.value.trim();
+        if (key.isEmpty || value.isEmpty) continue;
+        request.fields[key] = value;
+      }
     }
 
     final mimeType = _mimeTypeFor(file.path, category: category);
     final fileName = file.uri.pathSegments.isNotEmpty
         ? file.uri.pathSegments.last
         : 'upload.bin';
-    final fileBytes = await file.readAsBytes();
+    final fileLength = await file.length();
 
     request.files.add(
-      http.MultipartFile.fromBytes(
+      http.MultipartFile(
         'file',
-        fileBytes,
+        http.ByteStream(file.openRead()),
+        fileLength,
         filename: fileName,
         contentType: MediaType.parse(mimeType),
       ),
@@ -109,15 +134,15 @@ class VpsMediaService {
 
     onProgress?.call(0.1); // started
 
-    final streamedResponse = await request
-        .send()
-        .timeout(const Duration(seconds: 120));
+    final streamedResponse = await request.send().timeout(
+      const Duration(seconds: 120),
+    );
 
     onProgress?.call(0.8); // sent
 
-    final responseBody = await streamedResponse.stream
-        .bytesToString()
-        .timeout(const Duration(seconds: 60));
+    final responseBody = await streamedResponse.stream.bytesToString().timeout(
+      const Duration(seconds: 60),
+    );
 
     onProgress?.call(1.0); // done
 

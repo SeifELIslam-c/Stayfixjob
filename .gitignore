@@ -57,3 +57,9 @@ GoogleService-Info.plist
 # Node
 node_modules/
 package-lock.json
+
+# Claude Code local config
+.claude/
+
+# Android build artifacts
+android/build/
