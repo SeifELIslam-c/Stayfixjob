@@ -25,37 +25,45 @@ require File.expand_path(File.join('packages', 'flutter_tools', 'bin', 'podhelpe
 
 flutter_ios_podfile_setup
 
-# Flutter (stable) automatically adds Firebase plugins via Swift Package Manager
-# AND via CocoaPods simultaneously, producing 25 duplicate symbols at link time.
-# This hook runs after Flutter injects SPM references but before pod install
-# completes. It strips all SPM entries directly from project.pbxproj so only
-# CocoaPods provides Firebase — no gem API dependency, fully portable.
-pre_install do |installer|
+def strip_spm_from_pbxproj(tag)
   podfile_dir = File.dirname(File.expand_path(__FILE__))
   pbxproj = File.join(podfile_dir, 'Runner.xcodeproj', 'project.pbxproj')
-  pkg_resolved = File.join(podfile_dir, 'Runner.xcodeproj', 'project.xcworkspace',
-                           'xcshareddata', 'swiftpm', 'Package.resolved')
 
   unless File.exist?(pbxproj)
-    puts 'pre_install: Runner.xcodeproj/project.pbxproj not found — skipping SPM cleanup'
-    next
+    puts "#{tag}: project.pbxproj not found — skipping"
+    return
   end
 
   content = File.read(pbxproj)
-  before_size = content.length
+  before = content.length
 
-  # Remove the two SPM object sections
-  content.gsub!(/\n\/\* Begin XCRemoteSwiftPackageReference section \*\/.*?\/\* End XCRemoteSwiftPackageReference section \*\//m, '')
-  content.gsub!(/\n\/\* Begin XCSwiftPackageProductDependency section \*\/.*?\/\* End XCSwiftPackageProductDependency section \*\//m, '')
-  # Remove reference lists inside PBXProject / PBXNativeTarget
+  # Flutter uses XCLocalSwiftPackageReference (local pub-cache paths) on newer
+  # Xcode, and XCRemoteSwiftPackageReference on older. Cover every variant.
+  content.gsub!(/\/\* Begin XC[A-Za-z]*PackageReference section \*\/.*?\/\* End XC[A-Za-z]*PackageReference section \*\//m, '')
+  content.gsub!(/\/\* Begin XCSwiftPackageProductDependency section \*\/.*?\/\* End XCSwiftPackageProductDependency section \*\//m, '')
+
+  # Remove reference list keys from PBXProject (remote → packageReferences,
+  # local → localPackages) and from PBXNativeTarget (packageProductDependencies).
   content.gsub!(/\n[ \t]+packageReferences = \([^)]*\);/m, '')
+  content.gsub!(/\n[ \t]+localPackages = \([^)]*\);/m, '')
   content.gsub!(/\n[ \t]+packageProductDependencies = \([^)]*\);/m, '')
 
   File.write(pbxproj, content)
-  File.delete(pkg_resolved) if File.exist?(pkg_resolved)
 
-  removed = before_size - content.length
-  puts "pre_install: Stripped #{removed} bytes of SPM references from project.pbxproj — Firebase via CocoaPods only."
+  removed = before - content.length
+  puts "#{tag}: stripped #{removed} bytes of SPM refs from project.pbxproj"
+
+  # Remove any Package.resolved so Xcode doesn't try to re-resolve SPM deps.
+  [
+    File.join(podfile_dir, 'Runner.xcodeproj', 'project.xcworkspace', 'xcshareddata', 'swiftpm', 'Package.resolved'),
+    File.join(podfile_dir, '..', 'Runner.xcworkspace', 'xcshareddata', 'swiftpm', 'Package.resolved'),
+  ].each { |f| File.delete(f) if File.exist?(f) }
+end
+
+# Run before pods are installed (covers the normal case where pod install
+# runs after Flutter injects SPM into project.pbxproj).
+pre_install do |installer|
+  strip_spm_from_pbxproj('pre_install')
 end
 
 target 'Runner' do
@@ -75,4 +83,7 @@ post_install do |installer|
       config.build_settings['IPHONEOS_DEPLOYMENT_TARGET'] = '15.0'
     end
   end
+  # Second pass — ensures SPM refs are gone even if pre_install ran before
+  # Flutter had a chance to inject them (timing varies by Codemagic workflow).
+  strip_spm_from_pbxproj('post_install')
 end
