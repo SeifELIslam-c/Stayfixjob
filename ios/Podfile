@@ -26,6 +26,7 @@ require File.expand_path(File.join('packages', 'flutter_tools', 'bin', 'podhelpe
 flutter_ios_podfile_setup
 
 def strip_spm_from_pbxproj(tag)
+  require 'fileutils'
   podfile_dir = File.dirname(File.expand_path(__FILE__))
   pbxproj = File.join(podfile_dir, 'Runner.xcodeproj', 'project.pbxproj')
 
@@ -37,32 +38,47 @@ def strip_spm_from_pbxproj(tag)
   content = File.read(pbxproj)
   before = content.length
 
-  # Flutter uses XCLocalSwiftPackageReference (local pub-cache paths) on newer
-  # Xcode, and XCRemoteSwiftPackageReference on older. Cover every variant.
+  # Flutter ≥3.24 uses XCLocalSwiftPackageReference (local pub-cache paths).
+  # Older versions used XCRemoteSwiftPackageReference. Cover every variant.
   content.gsub!(/\/\* Begin XC[A-Za-z]*PackageReference section \*\/.*?\/\* End XC[A-Za-z]*PackageReference section \*\//m, '')
   content.gsub!(/\/\* Begin XCSwiftPackageProductDependency section \*\/.*?\/\* End XCSwiftPackageProductDependency section \*\//m, '')
-
-  # Remove reference list keys from PBXProject (remote → packageReferences,
-  # local → localPackages) and from PBXNativeTarget (packageProductDependencies).
-  content.gsub!(/\n[ \t]+packageReferences = \([^)]*\);/m, '')
-  content.gsub!(/\n[ \t]+localPackages = \([^)]*\);/m, '')
-  content.gsub!(/\n[ \t]+packageProductDependencies = \([^)]*\);/m, '')
+  # PBXProject reference-list keys differ by package type
+  content.gsub!(/\n[\t ]+packageReferences = \([^)]*\);/m, '')
+  content.gsub!(/\n[\t ]+localPackages = \([^)]*\);/m, '')
+  content.gsub!(/\n[\t ]+packageProductDependencies = \([^)]*\);/m, '')
 
   File.write(pbxproj, content)
+  puts "#{tag}: stripped #{before - content.length} bytes of SPM refs from project.pbxproj"
 
-  removed = before - content.length
-  puts "#{tag}: stripped #{removed} bytes of SPM refs from project.pbxproj"
+  # Also remove xcodeproj gem objects if the gem supports local-package API
+  begin
+    require 'xcodeproj'
+    proj = Xcodeproj::Project.open(pbxproj.sub('/project.pbxproj', ''))
+    [:package_references, :packages].each do |m|
+      next unless proj.root_object.respond_to?(m)
+      proj.root_object.send(m).to_a.each(&:remove_from_project)
+    end
+    proj.targets.each do |t|
+      t.package_product_dependencies.to_a.each(&:remove_from_project) if t.respond_to?(:package_product_dependencies)
+    end
+    proj.save
+    puts "#{tag}: xcodeproj gem pass complete"
+  rescue => e
+    puts "#{tag}: xcodeproj gem pass skipped (#{e.message})"
+  end
 
-  # Remove any Package.resolved so Xcode doesn't try to re-resolve SPM deps.
+  # Delete Package.resolved so Xcode cannot re-resolve SPM deps
   [
     File.join(podfile_dir, 'Runner.xcodeproj', 'project.xcworkspace', 'xcshareddata', 'swiftpm', 'Package.resolved'),
     File.join(podfile_dir, '..', 'Runner.xcworkspace', 'xcshareddata', 'swiftpm', 'Package.resolved'),
-  ].each { |f| File.delete(f) if File.exist?(f) }
+  ].each { |f| FileUtils.rm_f(f) && puts("#{tag}: deleted #{f}") }
 end
 
-# Run before pods are installed (covers the normal case where pod install
-# runs after Flutter injects SPM into project.pbxproj).
 pre_install do |installer|
+  # If Codemagic runs pod install as a SEPARATE step before flutter build ipa,
+  # writing this config here disables SPM for the subsequent build step.
+  system('flutter config --no-enable-swift-package-manager > /dev/null 2>&1 || true')
+  puts 'pre_install: flutter config --no-enable-swift-package-manager executed'
   strip_spm_from_pbxproj('pre_install')
 end
 
