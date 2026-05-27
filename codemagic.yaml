@@ -1,0 +1,56 @@
+workflows:
+  ios-release:
+    name: iOS Release
+    max_build_duration: 120
+    # -------------------------------------------------------------------
+    # IMPORTANT: In Codemagic → Teams → Integrations, your App Store
+    # Connect API key must be saved. Replace "App Store Connect" below
+    # with the exact name you gave it there.
+    # -------------------------------------------------------------------
+    integrations:
+      app_store_connect: App Store Connect
+    environment:
+      flutter: stable
+      xcode: latest
+      cocoapods: default
+      ios_signing:
+        distribution_type: app_store
+        bundle_identifier: com.rezzaky.stayfixjob
+      # ---------------------------------------------------------------
+      # IMPORTANT: In Codemagic → Apps → your app → Environment variables,
+      # create a group (e.g. "firebase") containing:
+      #   GOOGLE_SERVICES_IOS     — base64-encoded GoogleService-Info.plist
+      #   GOOGLE_SERVICES_ANDROID — base64-encoded google-services.json
+      # Then replace "firebase" below with your actual group name.
+      # ---------------------------------------------------------------
+      groups:
+        - firebase
+    scripts:
+      - name: Inject Firebase config files
+        script: |
+          echo "$GOOGLE_SERVICES_IOS" | base64 --decode > ios/Runner/GoogleService-Info.plist
+          echo "$GOOGLE_SERVICES_ANDROID" | base64 --decode > android/app/google-services.json
+
+      # This is the key fix: prevents Flutter from adding Swift Package Manager
+      # integration, which causes duplicate Firebase symbols alongside CocoaPods.
+      - name: Disable Flutter Swift Package Manager
+        script: flutter config --no-enable-swift-package-manager
+
+      - name: Get Flutter packages
+        script: flutter pub get
+
+      - name: Build iOS IPA
+        script: |
+          flutter build ipa \
+            --release \
+            --export-options-plist=$CM_EXPORT_DIR/ExportOptions.plist
+
+    artifacts:
+      - build/ios/ipa/*.ipa
+      - /tmp/xcodebuild_logs/*.log
+
+    publishing:
+      app_store_connect:
+        auth: integration
+        submit_to_testflight: true
+        cancel_previous_submissions: true
