@@ -28,24 +28,34 @@ flutter_ios_podfile_setup
 # Flutter (stable) automatically adds Firebase plugins via Swift Package Manager
 # AND via CocoaPods simultaneously, producing 25 duplicate symbols at link time.
 # This hook runs after Flutter injects SPM references but before pod install
-# completes, so it strips SPM packages out — leaving CocoaPods as the sole
-# Firebase provider and eliminating the conflict.
+# completes. It strips all SPM entries directly from project.pbxproj so only
+# CocoaPods provides Firebase — no gem API dependency, fully portable.
 pre_install do |installer|
-  require 'xcodeproj'
-  project = Xcodeproj::Project.open(File.expand_path('Runner.xcodeproj', File.dirname(__FILE__)))
+  podfile_dir = File.dirname(File.expand_path(__FILE__))
+  pbxproj = File.join(podfile_dir, 'Runner.xcodeproj', 'project.pbxproj')
+  pkg_resolved = File.join(podfile_dir, 'Runner.xcodeproj', 'project.xcworkspace',
+                           'xcshareddata', 'swiftpm', 'Package.resolved')
 
-  if project.root_object.respond_to?(:package_references)
-    project.root_object.package_references.to_a.each(&:remove_from_project)
+  unless File.exist?(pbxproj)
+    puts 'pre_install: Runner.xcodeproj/project.pbxproj not found — skipping SPM cleanup'
+    next
   end
 
-  project.targets.each do |target|
-    if target.respond_to?(:package_product_dependencies)
-      target.package_product_dependencies.to_a.each(&:remove_from_project)
-    end
-  end
+  content = File.read(pbxproj)
+  before_size = content.length
 
-  project.save
-  puts 'Removed SPM package references — Firebase will be provided by CocoaPods only.'
+  # Remove the two SPM object sections
+  content.gsub!(/\n\/\* Begin XCRemoteSwiftPackageReference section \*\/.*?\/\* End XCRemoteSwiftPackageReference section \*\//m, '')
+  content.gsub!(/\n\/\* Begin XCSwiftPackageProductDependency section \*\/.*?\/\* End XCSwiftPackageProductDependency section \*\//m, '')
+  # Remove reference lists inside PBXProject / PBXNativeTarget
+  content.gsub!(/\n[ \t]+packageReferences = \([^)]*\);/m, '')
+  content.gsub!(/\n[ \t]+packageProductDependencies = \([^)]*\);/m, '')
+
+  File.write(pbxproj, content)
+  File.delete(pkg_resolved) if File.exist?(pkg_resolved)
+
+  removed = before_size - content.length
+  puts "pre_install: Stripped #{removed} bytes of SPM references from project.pbxproj — Firebase via CocoaPods only."
 end
 
 target 'Runner' do
