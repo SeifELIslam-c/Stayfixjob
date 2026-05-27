@@ -25,6 +25,29 @@ require File.expand_path(File.join('packages', 'flutter_tools', 'bin', 'podhelpe
 
 flutter_ios_podfile_setup
 
+# Flutter (stable) automatically adds Firebase plugins via Swift Package Manager
+# AND via CocoaPods simultaneously, producing 25 duplicate symbols at link time.
+# This hook runs after Flutter injects SPM references but before pod install
+# completes, so it strips SPM packages out — leaving CocoaPods as the sole
+# Firebase provider and eliminating the conflict.
+pre_install do |installer|
+  require 'xcodeproj'
+  project = Xcodeproj::Project.open(File.expand_path('Runner.xcodeproj', File.dirname(__FILE__)))
+
+  if project.root_object.respond_to?(:package_references)
+    project.root_object.package_references.to_a.each(&:remove_from_project)
+  end
+
+  project.targets.each do |target|
+    if target.respond_to?(:package_product_dependencies)
+      target.package_product_dependencies.to_a.each(&:remove_from_project)
+    end
+  end
+
+  project.save
+  puts 'Removed SPM package references — Firebase will be provided by CocoaPods only.'
+end
+
 target 'Runner' do
   use_frameworks!
   use_modular_headers!
