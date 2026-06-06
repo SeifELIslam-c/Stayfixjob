@@ -1,5 +1,4 @@
 import 'dart:convert';
-import 'dart:io';
 
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:file_selector/file_selector.dart';
@@ -29,7 +28,7 @@ class CvPrivacyScreen extends StatefulWidget {
 }
 
 class _CvPrivacyScreenState extends State<CvPrivacyScreen> {
-  File? _selectedFile;
+  XFile? _selectedFile;
   String? _selectedFileName;
   int? _selectedFileSize;
   bool? _reviewAuthorizationAccepted;
@@ -76,8 +75,7 @@ class _CvPrivacyScreenState extends State<CvPrivacyScreen> {
 
     if (xFile == null) return;
 
-    final file = File(xFile.path);
-    final size = await file.length();
+    final size = await xFile.length();
 
     if (!xFile.name.toLowerCase().endsWith('.pdf')) {
       _snack('Seuls les fichiers PDF sont acceptes.', isError: true);
@@ -90,7 +88,7 @@ class _CvPrivacyScreenState extends State<CvPrivacyScreen> {
     }
 
     setState(() {
-      _selectedFile = file;
+      _selectedFile = xFile;
       _selectedFileName = xFile.name;
       _selectedFileSize = size;
     });
@@ -145,20 +143,18 @@ class _CvPrivacyScreenState extends State<CvPrivacyScreen> {
       final existingQuestionnaire =
           (existingData['cvQuestionnaire'] as Map<String, dynamic>?) ?? {};
 
-      await profileRef.update({
+      await profileRef.set({
         'cvBase64': base64String,
         'cvFileName':
             _selectedFileName ??
-            (_selectedFile!.path.contains('/')
-                ? _selectedFile!.path.split('/').last
-                : _selectedFile!.path.split(r'\').last),
+            _selectedFile!.name,
         'cvReviewAuthorization': _reviewAuthorizationAccepted,
         'cvQuestionnaire': {
           ...existingQuestionnaire,
           'privacyAccepted': _reviewAuthorizationAccepted,
           'submittedAt': FieldValue.serverTimestamp(),
         },
-      });
+      }, SetOptions(merge: true));
 
       if (!mounted) return;
 

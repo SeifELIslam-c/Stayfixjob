@@ -1,4 +1,3 @@
-import 'dart:async';
 import 'dart:convert';
 
 import 'package:cloud_firestore/cloud_firestore.dart';
@@ -28,52 +27,19 @@ class MessagesRepository {
       _firestore.collection(_threadsCollectionName);
 
   Stream<List<ConversationSeed>> watchConversationSeeds(String userId) {
-    final participantStream = _threadsCollection
-        .where('participants', arrayContains: userId)
-        .snapshots();
-    final workerStream = _threadsCollection
-        .where('workerId', isEqualTo: userId)
-        .snapshots();
-
-    late StreamController<List<ConversationSeed>> controller;
-    StreamSubscription<QuerySnapshot<Map<String, dynamic>>>? participantSub;
-    StreamSubscription<QuerySnapshot<Map<String, dynamic>>>? workerSub;
-    QuerySnapshot<Map<String, dynamic>>? participantSnapshot;
-    QuerySnapshot<Map<String, dynamic>>? workerSnapshot;
-
-    void emitMerged() {
+    return _threadsCollection.snapshots().map((snapshot) {
       final merged = <String, ConversationSeed>{};
-
-      void absorb(QuerySnapshot<Map<String, dynamic>>? snapshot) {
-        if (snapshot == null) return;
-        for (final doc in snapshot.docs) {
-          merged[doc.id] = ConversationSeed(id: doc.id, data: doc.data());
+      for (final doc in snapshot.docs) {
+        final data = doc.data();
+        final participants = _stringList(data['participants']);
+        final workerId = _stringOrNull(data['workerId']);
+        if (!participants.contains(userId) && workerId != userId) {
+          continue;
         }
+        merged[doc.id] = ConversationSeed(id: doc.id, data: data);
       }
-
-      absorb(participantSnapshot);
-      absorb(workerSnapshot);
-      controller.add(merged.values.toList(growable: false));
-    }
-
-    controller = StreamController<List<ConversationSeed>>(
-      onListen: () {
-        participantSub = participantStream.listen((snapshot) {
-          participantSnapshot = snapshot;
-          emitMerged();
-        }, onError: controller.addError);
-        workerSub = workerStream.listen((snapshot) {
-          workerSnapshot = snapshot;
-          emitMerged();
-        }, onError: controller.addError);
-      },
-      onCancel: () async {
-        await participantSub?.cancel();
-        await workerSub?.cancel();
-      },
-    );
-
-    return controller.stream;
+      return merged.values.toList(growable: false);
+    });
   }
 
   Stream<QuerySnapshot<Map<String, dynamic>>> messagesStream(

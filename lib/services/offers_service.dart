@@ -35,14 +35,18 @@ class OffersService {
     double? originLongitude,
     double maxDistanceKm = 35,
   }) async {
+    final normalizedDepartment = department.trim().toLowerCase();
     final snapshot = await _firestore
         .collection('offers')
         .where('status', isEqualTo: 'open')
-        .where('department', isEqualTo: department)
         .get();
     final offers = snapshot.docs
         .map((doc) => ManagerOffer.fromFirestore(doc))
         .where((offer) {
+          if (normalizedDepartment.isNotEmpty &&
+              offer.department.trim().toLowerCase() != normalizedDepartment) {
+            return false;
+          }
           if (!nearMeOnly ||
               originLatitude == null ||
               originLongitude == null) {
@@ -84,10 +88,7 @@ class OffersService {
   }
 
   Future<List<ManagerOffer>> loadManagerCreatedOffersForStayfixJob() async {
-    final snapshot = await _firestore
-        .collection('offers')
-        .where('targetApp', isEqualTo: 'stayfix_job')
-        .get();
+    final snapshot = await _firestore.collection('offers').get();
     // Filter in Dart so offers remain visible regardless of whether the manager
     // app writes 'open', 'active', or 'published' — only exclude terminal states.
     // ManagerOffer._parseStatus() maps any unrecognised value to OfferStatus.open,
@@ -96,6 +97,7 @@ class OffersService {
         .map((doc) => ManagerOffer.fromFirestore(doc))
         .where(
           (offer) =>
+              (offer.targetApp ?? '').trim().toLowerCase() == 'stayfix_job' &&
               offer.status != OfferStatus.assigned &&
               offer.status != OfferStatus.completed &&
               offer.status != OfferStatus.cancelled,
