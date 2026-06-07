@@ -49,12 +49,15 @@ class VpsMediaService {
   static const String _fallbackBaseUrl = 'https://159.89.98.134:8080';
   static const String _fallbackPublicUrl = 'https://159.89.98.134';
 
+  static String _trimTrailingSlash(String raw) =>
+      raw.endsWith('/') ? raw.substring(0, raw.length - 1) : raw;
+
   static String get _configuredBaseUrl {
     final raw =
         AppEnv.get('VPS_MEDIA_BASE_URL') ??
         AppEnv.get('VPS_BASE_URL') ??
         _fallbackBaseUrl;
-    final trimmed = raw.endsWith('/') ? raw.substring(0, raw.length - 1) : raw;
+    final trimmed = _trimTrailingSlash(raw);
     final parsed = Uri.tryParse(trimmed);
     if (parsed == null) return trimmed;
 
@@ -66,6 +69,14 @@ class VpsMediaService {
         parsed.host != '127.0.0.1';
     if (!shouldUpgradeToHttps) return trimmed;
     return parsed.replace(scheme: 'https').toString();
+  }
+
+  static String get _configuredPublicUrl {
+    final raw =
+        AppEnv.get('VPS_MEDIA_PUBLIC_URL') ??
+        AppEnv.get('VPS_PUBLIC_URL') ??
+        _fallbackPublicUrl;
+    return _trimTrailingSlash(raw);
   }
 
   static Future<Map<String, String>> _authHeaders() async {
@@ -201,17 +212,46 @@ class VpsMediaService {
     if (value.isEmpty) return '';
 
     final parsed = Uri.tryParse(value);
-    final fallback = Uri.tryParse(_fallbackPublicUrl);
-    if (parsed == null || fallback == null || !parsed.hasAuthority) {
+    final publicBase = Uri.tryParse(_configuredPublicUrl);
+    if (parsed == null) {
       return value;
     }
 
-    final configured = Uri.tryParse(_configuredBaseUrl);
-    final publicHost = configured?.replace(
+    if (!parsed.hasAuthority) {
+      if (publicBase == null) return value;
+      final normalizedPath = parsed.path.startsWith('/')
+          ? parsed.path
+          : '/${parsed.path}';
+      return publicBase.replace(
+        path: normalizedPath,
+        query: parsed.hasQuery ? parsed.query : null,
+      ).toString();
+    }
+
+    if (!_isManagedMediaHost(parsed)) {
+      return value;
+    }
+
+    if (publicBase == null) return value;
+    return publicBase.replace(
       path: parsed.path,
       query: parsed.hasQuery ? parsed.query : null,
-    );
-    return (publicHost ?? fallback.replace(path: parsed.path)).toString();
+    ).toString();
+  }
+
+  static bool _isManagedMediaHost(Uri uri) {
+    final host = uri.host.toLowerCase();
+    final managedHosts = <String>{
+      if (Uri.tryParse(_configuredBaseUrl)?.host case final configuredHost?)
+        configuredHost.toLowerCase(),
+      if (Uri.tryParse(_configuredPublicUrl)?.host case final publicHost?)
+        publicHost.toLowerCase(),
+      if (Uri.tryParse(_fallbackBaseUrl)?.host case final fallbackApiHost?)
+        fallbackApiHost.toLowerCase(),
+      if (Uri.tryParse(_fallbackPublicUrl)?.host case final fallbackHost?)
+        fallbackHost.toLowerCase(),
+    };
+    return managedHosts.contains(host);
   }
 
   static String? resolveProfileImageUrl(Map<String, dynamic> data) {

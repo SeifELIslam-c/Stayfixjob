@@ -36,13 +36,13 @@ class OffersService {
     double maxDistanceKm = 35,
   }) async {
     final normalizedDepartment = department.trim().toLowerCase();
-    final snapshot = await _firestore
-        .collection('offers')
-        .where('status', isEqualTo: 'open')
-        .get();
+    final snapshot = await _firestore.collection('offers').get();
     final offers = snapshot.docs
         .map((doc) => ManagerOffer.fromFirestore(doc))
         .where((offer) {
+          if (offer.status != OfferStatus.open) {
+            return false;
+          }
           if (normalizedDepartment.isNotEmpty &&
               offer.department.trim().toLowerCase() != normalizedDepartment) {
             return false;
@@ -108,12 +108,10 @@ class OffersService {
   }
 
   Future<List<ManagerOffer>> loadMyAssignedOffers(String workerUid) async {
-    final snapshot = await _firestore
-        .collection('offers')
-        .where('assignedWorkerId', isEqualTo: workerUid)
-        .get();
+    final snapshot = await _firestore.collection('offers').get();
     final offers = snapshot.docs
         .map((doc) => ManagerOffer.fromFirestore(doc))
+        .where((offer) => offer.assignedWorkerId == workerUid)
         .toList();
     offers.sort((a, b) => b.createdAt.compareTo(a.createdAt));
     return offers;
@@ -123,19 +121,15 @@ class OffersService {
     final uid = _uid;
     if (uid == null) return const <WorkerOffer>[];
     final results = await Future.wait([
-      _firestore
-          .collection('worker_offers')
-          .where('workerId', isEqualTo: uid)
-          .get(),
-      _firestore
-          .collection('workers offers')
-          .where('workerId', isEqualTo: uid)
-          .get(),
+      _firestore.collection('worker_offers').get(),
+      _firestore.collection('workers offers').get(),
     ]);
     final byId = <String, WorkerOffer>{};
     for (final snapshot in results) {
       for (final doc in snapshot.docs) {
-        byId[doc.id] = WorkerOffer.fromDocument(doc);
+        final offer = WorkerOffer.fromDocument(doc);
+        if (offer.workerId != uid) continue;
+        byId[doc.id] = offer;
       }
     }
     final offers = byId.values.toList();
@@ -369,13 +363,12 @@ class OffersService {
   Future<bool> hasAlreadyApplied(String offerId) async {
     final uid = _uid;
     if (uid == null) return false;
-    final snapshot = await _firestore
-        .collection('offer_applications')
-        .where('offerId', isEqualTo: offerId)
-        .where('workerId', isEqualTo: uid)
-        .limit(1)
-        .get();
-    return snapshot.docs.isNotEmpty;
+    final snapshot = await _firestore.collection('offer_applications').get();
+    return snapshot.docs.any((doc) {
+      final data = doc.data();
+      return (data['offerId'] as String? ?? '') == offerId &&
+          (data['workerId'] as String? ?? '') == uid;
+    });
   }
 
   Future<void> applyToOffer({
@@ -411,11 +404,9 @@ class OffersService {
   Future<Set<String>> loadAppliedOfferIds() async {
     final uid = _uid;
     if (uid == null) return {};
-    final snapshot = await _firestore
-        .collection('offer_applications')
-        .where('workerId', isEqualTo: uid)
-        .get();
+    final snapshot = await _firestore.collection('offer_applications').get();
     return snapshot.docs
+        .where((doc) => (doc.data()['workerId'] as String? ?? '') == uid)
         .map((doc) => doc.data()['offerId'] as String? ?? '')
         .where((id) => id.isNotEmpty)
         .toSet();
