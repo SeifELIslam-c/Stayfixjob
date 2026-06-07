@@ -68,7 +68,7 @@ class _MyAppState extends State<MyApp> {
         : const DeviceLockGate(child: HomeScreen(requireAuth: false));
 
     return MaterialApp(
-      title: 'Hotel Lux Profile',
+      title: 'Stayfix Job',
       debugShowCheckedModeBanner: false,
       navigatorKey: appNavigatorKey,
       theme: ThemeData(
