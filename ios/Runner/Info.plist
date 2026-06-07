@@ -39,14 +39,22 @@
 	<key>UIApplicationSupportsIndirectInputEvents</key>
 	<true/>
 	<key>NSLocationWhenInUseUsageDescription</key>
-	<string>Votre position est utilisee pour confirmer que vous etes sur le lieu de travail avant le pointage et pour proposer une adresse lors des mises a jour de profil.</string>
+	<string>Votre position est utilisee pendant l utilisation de l application pour confirmer que vous etes sur le lieu de travail avant le pointage, afficher votre position sur la carte et proposer une adresse lors des mises a jour de profil ou de publication.</string>
+	<key>NSLocationAlwaysAndWhenInUseUsageDescription</key>
+	<string>Votre position peut aussi etre utilisee lorsque iOS maintient certains services de localisation de l application afin de verifier votre presence dans la zone de travail pour le pointage et de faciliter les fonctions de carte et d adresse associees a votre activite professionnelle.</string>
+	<key>NSLocationAlwaysUsageDescription</key>
+	<string>Votre position peut etre utilisee pour verifier votre presence dans la zone de travail pour le pointage et pour prendre en charge les fonctions de carte et d adresse liees a votre activite dans l application.</string>
 	<key>ITSAppUsesNonExemptEncryption</key>
 	<false/>
 	<key>NSCameraUsageDescription</key>
-	<string>L'acces a la camera permet au personnel de prendre une photo de profil, d'envoyer des photos dans les conversations de travail et d'enregistrer des videos pour les mises a jour d'intervention.</string>
+	<string>L acces a la camera permet au personnel de prendre une photo de profil, de capturer une photo ou une video a joindre dans les conversations de travail et d enregistrer des videos pour les mises a jour d intervention.</string>
 	<key>NSPhotoLibraryUsageDescription</key>
-	<string>L'acces a la phototheque permet au personnel de choisir une photo de profil, d'ajouter des images aux conversations de travail et de joindre des medias aux stories et offres.</string>
+	<string>L acces a la phototheque permet au personnel de choisir une photo de profil et de selectionner des photos ou videos existantes a joindre dans les conversations, stories et offres de travail.</string>
+	<key>NSPhotoLibraryAddUsageDescription</key>
+	<string>L acces en ajout a la phototheque peut etre utilise pour enregistrer ou exporter des medias de travail generes dans l application lorsque cette action est demandee par l utilisateur.</string>
 	<key>NSMicrophoneUsageDescription</key>
-	<string>L'acces au microphone permet d'enregistrer des messages vocaux et des videos avec du son dans les conversations de travail.</string>
+	<string>L acces au microphone permet d enregistrer des messages vocaux et des videos avec du son a partager dans les conversations de travail.</string>
+	<key>NSFaceIDUsageDescription</key>
+	<string>Face ID peut etre utilise pour deverrouiller rapidement l acces securise a l application sur votre appareil.</string>
 </dict>
 </plist>
