@@ -2,6 +2,7 @@ import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/cupertino.dart';
 import 'package:flutter/material.dart';
+import 'package:google_sign_in/google_sign_in.dart';
 import 'package:intl_phone_field/country_picker_dialog.dart';
 import 'package:intl_phone_field/intl_phone_field.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
@@ -34,6 +35,14 @@ class SettingsScreen extends StatefulWidget {
 }
 
 class _SettingsScreenState extends State<SettingsScreen> {
+  static const List<String> _deleteReasons = <String>[
+    'J ai trouve un emploi',
+    'Je n utilise plus l application',
+    'Je cree un nouveau compte',
+    'Je souhaite proteger mes donnees',
+    'Autre raison',
+  ];
+
   final _nameCtrl = TextEditingController();
   final _emailCtrl = TextEditingController();
   final _passCtrl = TextEditingController();
@@ -61,7 +70,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
   String _phoneComplete = '';
   String _phoneCountryIso = 'CA';
   String _phoneDialCode = '1';
-  String _expandedSection = '';
+  String _expandedSection = 'danger';
   bool _didTriggerInitialAddressPicker = false;
   Map<String, dynamic> _existingCvQuestionnaire = {};
   double? _addressLatitude;
@@ -413,63 +422,167 @@ class _SettingsScreenState extends State<SettingsScreen> {
   Future<String?> _promptCurrentPassword() async {
     final controller = TextEditingController();
     String? errorText;
-
-    final password = await showDialog<String>(
+    final password = await showModalBottomSheet<String>(
       context: context,
-      barrierDismissible: false,
+      isScrollControlled: true,
+      backgroundColor: Colors.transparent,
       builder: (dialogContext) {
         return StatefulBuilder(
           builder: (context, setDialogState) {
-            return AlertDialog(
-              title: const Text('Confirmer votre mot de passe'),
-              content: Column(
-                mainAxisSize: MainAxisSize.min,
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  const Text(
-                    'Pour supprimer definitivement votre compte, saisissez votre mot de passe actuel.',
-                  ),
-                  const SizedBox(height: 12),
-                  TextField(
-                    controller: controller,
-                    obscureText: true,
-                    autofocus: true,
-                    decoration: InputDecoration(
-                      labelText: 'Mot de passe actuel',
-                      errorText: errorText,
-                    ),
-                    onSubmitted: (_) {
-                      final value = controller.text.trim();
-                      if (value.isEmpty) {
-                        setDialogState(() {
-                          errorText = 'Le mot de passe est requis.';
-                        });
-                        return;
-                      }
-                      Navigator.of(dialogContext).pop(value);
-                    },
-                  ),
-                ],
+            return Padding(
+              padding: EdgeInsets.only(
+                left: 12,
+                right: 12,
+                top: 12,
+                bottom: MediaQuery.of(context).viewInsets.bottom + 12,
               ),
-              actions: [
-                TextButton(
-                  onPressed: () => Navigator.of(dialogContext).pop(),
-                  child: const Text('Annuler'),
+              child: Container(
+                decoration: BoxDecoration(
+                  color: const Color(0xFFF8FAFF),
+                  borderRadius: BorderRadius.circular(28),
+                  border: Border.all(color: const Color(0xFFE7EEF8)),
                 ),
-                FilledButton(
-                  onPressed: () {
-                    final value = controller.text.trim();
-                    if (value.isEmpty) {
-                      setDialogState(() {
-                        errorText = 'Le mot de passe est requis.';
-                      });
-                      return;
-                    }
-                    Navigator.of(dialogContext).pop(value);
-                  },
-                  child: const Text('Continuer'),
+                padding: const EdgeInsets.fromLTRB(18, 16, 18, 18),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Center(
+                      child: Container(
+                        width: 44,
+                        height: 5,
+                        decoration: BoxDecoration(
+                          color: const Color(0xFFD5DEEE),
+                          borderRadius: BorderRadius.circular(999),
+                        ),
+                      ),
+                    ),
+                    const SizedBox(height: 16),
+                    const Row(
+                      children: [
+                        Icon(
+                          LucideIcons.lockKeyhole,
+                          color: kSettingsBlue,
+                          size: 20,
+                        ),
+                        SizedBox(width: 10),
+                        Expanded(
+                          child: Text(
+                            'Confirmer votre identite',
+                            style: TextStyle(
+                              color: kSettingsText,
+                              fontSize: 18,
+                              fontWeight: FontWeight.w800,
+                            ),
+                          ),
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 10),
+                    const Text(
+                      'Pour supprimer definitivement votre compte, saisissez votre mot de passe actuel.',
+                      style: TextStyle(
+                        color: kSettingsBody,
+                        fontSize: 13.5,
+                        height: 1.45,
+                        fontWeight: FontWeight.w500,
+                      ),
+                    ),
+                    const SizedBox(height: 16),
+                    CupertinoTextField(
+                      controller: controller,
+                      obscureText: true,
+                      autofocus: true,
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 16,
+                        vertical: 14,
+                      ),
+                      placeholder: 'Mot de passe actuel',
+                      style: const TextStyle(
+                        color: kSettingsText,
+                        fontSize: 15,
+                        fontWeight: FontWeight.w600,
+                      ),
+                      placeholderStyle: const TextStyle(
+                        color: kSettingsMuted,
+                        fontSize: 15,
+                      ),
+                      decoration: BoxDecoration(
+                        color: Colors.white,
+                        borderRadius: BorderRadius.circular(18),
+                        border: Border.all(
+                          color: errorText == null
+                              ? kSettingsBorder
+                              : const Color(0xFFFCA5A5),
+                        ),
+                      ),
+                      onSubmitted: (_) {
+                        final value = controller.text.trim();
+                        if (value.isEmpty) {
+                          setDialogState(() {
+                            errorText = 'Le mot de passe est requis.';
+                          });
+                          return;
+                        }
+                        Navigator.of(dialogContext).pop(value);
+                      },
+                    ),
+                    if (errorText != null) ...[
+                      const SizedBox(height: 8),
+                      Text(
+                        errorText,
+                        style: const TextStyle(
+                          color: kSettingsRed,
+                          fontSize: 12.5,
+                          fontWeight: FontWeight.w700,
+                        ),
+                      ),
+                    ],
+                    const SizedBox(height: 18),
+                    Row(
+                      children: [
+                        Expanded(
+                          child: OutlinedButton(
+                            onPressed: () => Navigator.of(dialogContext).pop(),
+                            style: OutlinedButton.styleFrom(
+                              foregroundColor: kSettingsText,
+                              side: const BorderSide(color: kSettingsBorder),
+                              minimumSize: const Size.fromHeight(48),
+                              shape: RoundedRectangleBorder(
+                                borderRadius: BorderRadius.circular(16),
+                              ),
+                            ),
+                            child: const Text('Annuler'),
+                          ),
+                        ),
+                        const SizedBox(width: 12),
+                        Expanded(
+                          child: FilledButton(
+                            onPressed: () {
+                              final value = controller.text.trim();
+                              if (value.isEmpty) {
+                                setDialogState(() {
+                                  errorText = 'Le mot de passe est requis.';
+                                });
+                                return;
+                              }
+                              Navigator.of(dialogContext).pop(value);
+                            },
+                            style: FilledButton.styleFrom(
+                              backgroundColor: kSettingsBlue,
+                              minimumSize: const Size.fromHeight(48),
+                              shape: RoundedRectangleBorder(
+                                borderRadius: BorderRadius.circular(16),
+                              ),
+                            ),
+                            child: const Text('Continuer'),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ],
                 ),
-              ],
+              ),
             );
           },
         );
@@ -507,7 +620,21 @@ class _SettingsScreenState extends State<SettingsScreen> {
     }
 
     if (providerIds.contains('google.com')) {
-      await user.reauthenticateWithProvider(GoogleAuthProvider());
+      final googleSignIn = GoogleSignIn(scopes: const ['email']);
+      await googleSignIn.signOut();
+      final googleAccount = await googleSignIn.signIn();
+      if (googleAccount == null) {
+        throw FirebaseAuthException(
+          code: 'user-cancelled',
+          message: 'Suppression annulee.',
+        );
+      }
+      final googleAuth = await googleAccount.authentication;
+      final credential = GoogleAuthProvider.credential(
+        accessToken: googleAuth.accessToken,
+        idToken: googleAuth.idToken,
+      );
+      await user.reauthenticateWithCredential(credential);
       return;
     }
 
@@ -519,31 +646,476 @@ class _SettingsScreenState extends State<SettingsScreen> {
     }
   }
 
-  Future<void> _deleteAccount() async {
-    final confirmed = await showDialog<bool>(
+  Future<String?> _showDeletionReasonPicker(String currentValue) async {
+    final initialIndex =
+        _deleteReasons.indexOf(currentValue) < 0
+            ? 0
+            : _deleteReasons.indexOf(currentValue);
+    var selectedIndex = initialIndex;
+
+    return showCupertinoModalPopup<String>(
       context: context,
       builder: (dialogContext) {
-        return AlertDialog(
-          title: const Text('Supprimer mon compte'),
-          content: const Text(
-            'Cette action supprimera votre acces a l application et vos informations de profil. Cette action est definitive.',
+        return Container(
+          height: 320,
+          decoration: const BoxDecoration(
+            color: Color(0xFFF7F9FC),
+            borderRadius: BorderRadius.vertical(top: Radius.circular(28)),
           ),
-          actions: [
-            TextButton(
-              onPressed: () => Navigator.of(dialogContext).pop(false),
-              child: const Text('Annuler'),
-            ),
-            FilledButton(
-              style: FilledButton.styleFrom(backgroundColor: kSettingsRed),
-              onPressed: () => Navigator.of(dialogContext).pop(true),
-              child: const Text('Supprimer'),
-            ),
-          ],
+          child: Column(
+            children: [
+              Padding(
+                padding: const EdgeInsets.fromLTRB(16, 12, 16, 8),
+                child: Row(
+                  children: [
+                    CupertinoButton(
+                      padding: EdgeInsets.zero,
+                      onPressed: () => Navigator.of(dialogContext).pop(),
+                      child: const Text('Annuler'),
+                    ),
+                    const Expanded(
+                      child: Text(
+                        'Motif de suppression',
+                        textAlign: TextAlign.center,
+                        style: TextStyle(
+                          color: kSettingsText,
+                          fontSize: 17,
+                          fontWeight: FontWeight.w700,
+                        ),
+                      ),
+                    ),
+                    CupertinoButton(
+                      padding: EdgeInsets.zero,
+                      onPressed: () => Navigator.of(dialogContext)
+                          .pop(_deleteReasons[selectedIndex]),
+                      child: const Text('Valider'),
+                    ),
+                  ],
+                ),
+              ),
+              const Divider(height: 1, color: Color(0xFFE3EAF7)),
+              Expanded(
+                child: CupertinoPicker(
+                  scrollController: FixedExtentScrollController(
+                    initialItem: initialIndex,
+                  ),
+                  itemExtent: 42,
+                  useMagnifier: true,
+                  magnification: 1.05,
+                  onSelectedItemChanged: (index) => selectedIndex = index,
+                  children: _deleteReasons
+                      .map(
+                        (reason) => Center(
+                          child: Text(
+                            reason,
+                            style: const TextStyle(
+                              color: kSettingsText,
+                              fontSize: 17,
+                              fontWeight: FontWeight.w600,
+                            ),
+                          ),
+                        ),
+                      )
+                      .toList(),
+                ),
+              ),
+            ],
+          ),
+        );
+      },
+    );
+  }
+
+  Future<String?> _showDeleteAccountSheet() async {
+    final confirmationController = TextEditingController();
+    var selectedReason = _deleteReasons.first;
+    var acknowledged = false;
+
+    final result = await showModalBottomSheet<String>(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: Colors.transparent,
+      builder: (dialogContext) {
+        return StatefulBuilder(
+          builder: (context, setSheetState) {
+            final canContinue =
+                acknowledged &&
+                confirmationController.text.trim().toUpperCase() ==
+                    'SUPPRIMER';
+            return Padding(
+              padding: EdgeInsets.only(
+                left: 12,
+                right: 12,
+                top: 12,
+                bottom: MediaQuery.of(context).viewInsets.bottom + 12,
+              ),
+              child: Container(
+                decoration: BoxDecoration(
+                  color: const Color(0xFFF8FAFF),
+                  borderRadius: BorderRadius.circular(30),
+                  border: Border.all(color: const Color(0xFFE7EEF8)),
+                ),
+                padding: const EdgeInsets.fromLTRB(18, 16, 18, 18),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Center(
+                      child: Container(
+                        width: 44,
+                        height: 5,
+                        decoration: BoxDecoration(
+                          color: const Color(0xFFD5DEEE),
+                          borderRadius: BorderRadius.circular(999),
+                        ),
+                      ),
+                    ),
+                    const SizedBox(height: 16),
+                    Row(
+                      children: [
+                        Container(
+                          width: 44,
+                          height: 44,
+                          decoration: BoxDecoration(
+                            color: const Color(0xFFFFF1F2),
+                            borderRadius: BorderRadius.circular(16),
+                          ),
+                          child: const Icon(
+                            LucideIcons.badgeAlert,
+                            color: kSettingsRed,
+                            size: 22,
+                          ),
+                        ),
+                        const SizedBox(width: 12),
+                        const Expanded(
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Text(
+                                'Suppression definitive du compte',
+                                style: TextStyle(
+                                  color: kSettingsText,
+                                  fontSize: 18,
+                                  fontWeight: FontWeight.w800,
+                                ),
+                              ),
+                              SizedBox(height: 4),
+                              Text(
+                                'Cette action supprimera votre acces, votre profil et vos donnees principales.',
+                                style: TextStyle(
+                                  color: kSettingsBody,
+                                  fontSize: 13,
+                                  height: 1.4,
+                                  fontWeight: FontWeight.w500,
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 18),
+                    Container(
+                      width: double.infinity,
+                      padding: const EdgeInsets.all(14),
+                      decoration: BoxDecoration(
+                        color: Colors.white,
+                        borderRadius: BorderRadius.circular(20),
+                        border: Border.all(color: kSettingsBorder),
+                      ),
+                      child: const Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            'Ce qui sera supprime',
+                            style: TextStyle(
+                              color: kSettingsText,
+                              fontSize: 14,
+                              fontWeight: FontWeight.w800,
+                            ),
+                          ),
+                          SizedBox(height: 10),
+                          _DeleteFlowBullet(
+                            text: 'Votre compte Firebase Authentication',
+                          ),
+                          _DeleteFlowBullet(
+                            text: 'Votre profil et vos donnees utilisateur dans Firestore',
+                          ),
+                          _DeleteFlowBullet(
+                            text: 'Vos candidatures, stories et offres personnelles enregistrees',
+                          ),
+                        ],
+                      ),
+                    ),
+                    const SizedBox(height: 14),
+                    const Text(
+                      'Motif de suppression',
+                      style: TextStyle(
+                        color: kSettingsText,
+                        fontSize: 13.5,
+                        fontWeight: FontWeight.w700,
+                      ),
+                    ),
+                    const SizedBox(height: 8),
+                    InkWell(
+                      onTap: () async {
+                        final picked = await _showDeletionReasonPicker(
+                          selectedReason,
+                        );
+                        if (picked == null) return;
+                        setSheetState(() => selectedReason = picked);
+                      },
+                      borderRadius: BorderRadius.circular(18),
+                      child: Container(
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 16,
+                          vertical: 15,
+                        ),
+                        decoration: BoxDecoration(
+                          color: Colors.white,
+                          borderRadius: BorderRadius.circular(18),
+                          border: Border.all(color: kSettingsBorder),
+                        ),
+                        child: Row(
+                          children: [
+                            const Icon(
+                              LucideIcons.listFilter,
+                              color: kSettingsBlue,
+                              size: 18,
+                            ),
+                            const SizedBox(width: 10),
+                            Expanded(
+                              child: Text(
+                                selectedReason,
+                                style: const TextStyle(
+                                  color: kSettingsText,
+                                  fontSize: 14.5,
+                                  fontWeight: FontWeight.w700,
+                                ),
+                              ),
+                            ),
+                            const Icon(
+                              LucideIcons.chevronDown,
+                              color: kSettingsMuted,
+                              size: 18,
+                            ),
+                          ],
+                        ),
+                      ),
+                    ),
+                    const SizedBox(height: 14),
+                    const Text(
+                      'Tapez SUPPRIMER pour confirmer',
+                      style: TextStyle(
+                        color: kSettingsText,
+                        fontSize: 13.5,
+                        fontWeight: FontWeight.w700,
+                      ),
+                    ),
+                    const SizedBox(height: 8),
+                    CupertinoTextField(
+                      controller: confirmationController,
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 16,
+                        vertical: 14,
+                      ),
+                      textCapitalization: TextCapitalization.characters,
+                      onChanged: (_) => setSheetState(() {}),
+                      placeholder: 'SUPPRIMER',
+                      style: const TextStyle(
+                        color: kSettingsText,
+                        fontSize: 15,
+                        fontWeight: FontWeight.w700,
+                        letterSpacing: 0.6,
+                      ),
+                      decoration: BoxDecoration(
+                        color: Colors.white,
+                        borderRadius: BorderRadius.circular(18),
+                        border: Border.all(
+                          color: confirmationController.text.isEmpty
+                              ? kSettingsBorder
+                              : canContinue
+                                  ? const Color(0xFFBBF7D0)
+                                  : const Color(0xFFFECACA),
+                        ),
+                      ),
+                    ),
+                    const SizedBox(height: 12),
+                    InkWell(
+                      onTap: () => setSheetState(
+                        () => acknowledged = !acknowledged,
+                      ),
+                      borderRadius: BorderRadius.circular(18),
+                      child: Container(
+                        padding: const EdgeInsets.all(14),
+                        decoration: BoxDecoration(
+                          color: acknowledged
+                              ? const Color(0xFFFFF1F2)
+                              : Colors.white,
+                          borderRadius: BorderRadius.circular(18),
+                          border: Border.all(
+                            color: acknowledged
+                                ? const Color(0xFFFDA4AF)
+                                : kSettingsBorder,
+                          ),
+                        ),
+                        child: Row(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Icon(
+                              acknowledged
+                                  ? LucideIcons.checkCircle2
+                                  : LucideIcons.circle,
+                              color: acknowledged
+                                  ? kSettingsRed
+                                  : kSettingsMuted,
+                              size: 18,
+                            ),
+                            const SizedBox(width: 10),
+                            const Expanded(
+                              child: Text(
+                                'Je comprends que cette suppression est definitive et que je devrai creer un nouveau compte pour revenir.',
+                                style: TextStyle(
+                                  color: kSettingsBody,
+                                  fontSize: 13,
+                                  height: 1.45,
+                                  fontWeight: FontWeight.w500,
+                                ),
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ),
+                    const SizedBox(height: 18),
+                    Row(
+                      children: [
+                        Expanded(
+                          child: OutlinedButton(
+                            onPressed: () => Navigator.of(dialogContext).pop(),
+                            style: OutlinedButton.styleFrom(
+                              foregroundColor: kSettingsText,
+                              side: const BorderSide(color: kSettingsBorder),
+                              minimumSize: const Size.fromHeight(50),
+                              shape: RoundedRectangleBorder(
+                                borderRadius: BorderRadius.circular(18),
+                              ),
+                            ),
+                            child: const Text('Annuler'),
+                          ),
+                        ),
+                        const SizedBox(width: 12),
+                        Expanded(
+                          child: FilledButton.icon(
+                            onPressed: canContinue
+                                ? () => Navigator.of(dialogContext)
+                                    .pop(selectedReason)
+                                : null,
+                            icon: const Icon(LucideIcons.trash2, size: 16),
+                            label: const Text('Supprimer'),
+                            style: FilledButton.styleFrom(
+                              backgroundColor: kSettingsRed,
+                              disabledBackgroundColor:
+                                  const Color(0xFFFCA5A5),
+                              minimumSize: const Size.fromHeight(50),
+                              shape: RoundedRectangleBorder(
+                                borderRadius: BorderRadius.circular(18),
+                              ),
+                            ),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ],
+                ),
+              ),
+            );
+          },
         );
       },
     );
 
-    if (confirmed != true) return;
+    confirmationController.dispose();
+    return result;
+  }
+
+  Future<void> _deleteDocsByField({
+    required FirebaseFirestore firestore,
+    required String collection,
+    required String field,
+    required String value,
+  }) async {
+    final snapshot = await firestore
+        .collection(collection)
+        .where(field, isEqualTo: value)
+        .get();
+    if (snapshot.docs.isEmpty) return;
+
+    for (var i = 0; i < snapshot.docs.length; i += 400) {
+      final batch = firestore.batch();
+      final chunk = snapshot.docs.skip(i).take(400);
+      for (final doc in chunk) {
+        batch.delete(doc.reference);
+      }
+      await batch.commit();
+    }
+  }
+
+  Future<void> _deleteFirestoreAccountData(
+    String uid, {
+    required String deletionReason,
+  }) async {
+    final firestore = FirebaseFirestore.instance;
+
+    await Future.wait([
+      firestore.collection('profiles').doc(uid).delete(),
+      firestore.collection('users').doc(uid).delete(),
+      _deleteDocsByField(
+        firestore: firestore,
+        collection: 'worker_offers',
+        field: 'workerId',
+        value: uid,
+      ),
+      _deleteDocsByField(
+        firestore: firestore,
+        collection: 'workers offers',
+        field: 'workerId',
+        value: uid,
+      ),
+      _deleteDocsByField(
+        firestore: firestore,
+        collection: 'offer_applications',
+        field: 'workerId',
+        value: uid,
+      ),
+      _deleteDocsByField(
+        firestore: firestore,
+        collection: 'stories',
+        field: 'ownerUid',
+        value: uid,
+      ),
+      _deleteDocsByField(
+        firestore: firestore,
+        collection: 'role_requests',
+        field: 'userId',
+        value: uid,
+      ),
+      _deleteDocsByField(
+        firestore: firestore,
+        collection: 'role_requests',
+        field: 'requesterId',
+        value: uid,
+      ),
+    ]);
+
+    debugPrint(
+      'Account deletion cleanup complete for uid=$uid, reason=$deletionReason',
+    );
+  }
+
+  Future<void> _deleteAccount() async {
+    final deletionReason = await _showDeleteAccountSheet();
+    if (deletionReason == null) return;
 
     final user = FirebaseAuth.instance.currentUser;
     if (user == null) return;
@@ -558,19 +1130,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
     try {
       final uid = user.uid;
       await _reauthenticateForDeletion(user);
-
-      final batch = FirebaseFirestore.instance.batch();
-      batch.delete(FirebaseFirestore.instance.collection('profiles').doc(uid));
-      batch.set(
-        FirebaseFirestore.instance.collection('users').doc(uid),
-        {
-          'status': 'deleted',
-          'deletedAt': FieldValue.serverTimestamp(),
-          'deletedBy': 'self-service',
-        },
-        SetOptions(merge: true),
-      );
-      await batch.commit();
+      await _deleteFirestoreAccountData(uid, deletionReason: deletionReason);
       await user.delete();
 
       final prefs = await SharedPreferences.getInstance();
@@ -1751,7 +2311,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
               Icon(LucideIcons.triangleAlert, color: kSettingsRed, size: 20),
               SizedBox(width: 10),
               Text(
-                'Zone sensible',
+                'Suppression definitive',
                 style: TextStyle(
                   color: kSettingsText,
                   fontSize: 17,
@@ -1804,6 +2364,108 @@ class _SettingsScreenState extends State<SettingsScreen> {
     );
   }
 
+  Widget _buildDeleteAccountCallout() {
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.all(18),
+      decoration: BoxDecoration(
+        gradient: const LinearGradient(
+          colors: [Color(0xFFFFF5F5), Color(0xFFFFF1F2)],
+          begin: Alignment.topLeft,
+          end: Alignment.bottomRight,
+        ),
+        borderRadius: BorderRadius.circular(26),
+        border: Border.all(color: const Color(0xFFFECACA)),
+        boxShadow: const [
+          BoxShadow(
+            color: Color(0x10FF4D4F),
+            blurRadius: 18,
+            offset: Offset(0, 8),
+          ),
+        ],
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Container(
+                width: 50,
+                height: 50,
+                decoration: BoxDecoration(
+                  color: Colors.white,
+                  borderRadius: BorderRadius.circular(18),
+                ),
+                child: const Icon(
+                  LucideIcons.shieldAlert,
+                  color: kSettingsRed,
+                  size: 24,
+                ),
+              ),
+              const SizedBox(width: 12),
+              const Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      'Suppression du compte',
+                      style: TextStyle(
+                        color: kSettingsText,
+                        fontSize: 18,
+                        fontWeight: FontWeight.w800,
+                      ),
+                    ),
+                    SizedBox(height: 4),
+                    Text(
+                      'Option visible dans l application pour supprimer definitivement votre compte et vos donnees principales.',
+                      style: TextStyle(
+                        color: kSettingsBody,
+                        fontSize: 13.2,
+                        height: 1.4,
+                        fontWeight: FontWeight.w500,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 16),
+          SizedBox(
+            width: double.infinity,
+            child: FilledButton.icon(
+              onPressed: (_isLoading || _isDeletingAccount)
+                  ? null
+                  : _deleteAccount,
+              icon: _isDeletingAccount
+                  ? const SizedBox(
+                      width: 16,
+                      height: 16,
+                      child: CircularProgressIndicator(
+                        strokeWidth: 2,
+                        color: Colors.white,
+                      ),
+                    )
+                  : const Icon(LucideIcons.trash2, size: 18),
+              label: Text(
+                _isDeletingAccount
+                    ? 'Suppression en cours...'
+                    : 'Supprimer mon compte maintenant',
+              ),
+              style: FilledButton.styleFrom(
+                backgroundColor: kSettingsRed,
+                minimumSize: const Size.fromHeight(52),
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(18),
+                ),
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
   Widget _buildContent() {
     return Container(
       decoration: const BoxDecoration(
@@ -1814,6 +2476,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
         padding: const EdgeInsets.fromLTRB(18, 18, 18, 24),
         child: Column(
           children: [
+            _buildDeleteAccountCallout(),
+            const SizedBox(height: 14),
             _sectionShell(
               id: 'account',
               icon: LucideIcons.user,
@@ -1857,8 +2521,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
             _sectionShell(
               id: 'danger',
               icon: LucideIcons.shieldAlert,
-              title: 'Gestion du compte',
-              subtitle: 'Options sensibles et suppression du compte',
+              title: 'Suppression du compte',
+              subtitle: 'Suppression definitive du compte depuis l application',
               child: _buildDangerSection(),
             ),
           ],
@@ -1900,5 +2564,43 @@ class _SettingsScreenState extends State<SettingsScreen> {
     _addressCtrl.dispose();
     _referralEmployeeIdCtrl.dispose();
     super.dispose();
+  }
+}
+
+class _DeleteFlowBullet extends StatelessWidget {
+  const _DeleteFlowBullet({required this.text});
+
+  final String text;
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 8),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Padding(
+            padding: EdgeInsets.only(top: 3),
+            child: Icon(
+              Icons.circle,
+              color: kSettingsRed,
+              size: 8,
+            ),
+          ),
+          const SizedBox(width: 6),
+          Expanded(
+            child: Text(
+              text,
+              style: const TextStyle(
+                color: kSettingsBody,
+                fontSize: 13,
+                height: 1.4,
+                fontWeight: FontWeight.w500,
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
   }
 }
