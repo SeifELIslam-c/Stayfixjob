@@ -649,7 +649,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
 
   Future<String?> _showDeletionReasonPicker(String currentValue) async {
     final initialIndex =
-        _deleteReasons.indexOf(currentValue) < 0
+        !_deleteReasons.contains(currentValue)
             ? 0
             : _deleteReasons.indexOf(currentValue);
     var selectedIndex = initialIndex;
@@ -1145,7 +1145,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
       final prefs = await SharedPreferences.getInstance();
       await prefs.remove('isLoggedIn');
       await prefs.remove('userId');
-      await GoogleSignIn().signOut().catchError((_) {});
+      await GoogleSignIn().signOut().catchError((_) => null);
       await FirebaseAuth.instance.signOut();
 
       if (!mounted) return;
