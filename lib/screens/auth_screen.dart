@@ -194,15 +194,40 @@ class _AuthScreenState extends State<AuthScreen> {
         userData['status'] != 'deleted';
   }
 
+  bool _hasAnySelectionData(Map<String, dynamic> profileData) {
+    final department = (profileData['department'] as String? ?? '').trim();
+    final maintenanceType =
+        (profileData['maintenanceType'] as String? ?? '').trim();
+    final specialties = (profileData['specialties'] as List? ?? const <dynamic>[])
+        .where((value) => value.toString().trim().isNotEmpty)
+        .toList();
+    return department.isNotEmpty ||
+        maintenanceType.isNotEmpty ||
+        specialties.isNotEmpty;
+  }
+
+  bool _shouldTreatTermsAsAccepted(Map<String, dynamic> profileData) {
+    if (profileData['termsAccepted'] == true) return true;
+    return _hasAnySelectionData(profileData);
+  }
+
   Future<void> _routeAuthenticatedUser(
     Map<String, dynamic> profileData, {
     required String userId,
+    bool isExistingAccount = false,
   }) async {
     final isStayFixConcierge = await _isStayFixConcierge(userId);
-    final dept = profileData['department'] ?? '';
-    final termsAccepted = profileData['termsAccepted'] ?? false;
+    final dept = (profileData['department'] as String? ?? '').trim();
+    final termsAccepted = _shouldTreatTermsAsAccepted(profileData);
 
     if (!mounted) return;
+    if (isExistingAccount) {
+      Navigator.pushReplacement(
+        context,
+        MaterialPageRoute(builder: (_) => const HomeScreen(requireAuth: false)),
+      );
+      return;
+    }
     if (!termsAccepted) {
       Navigator.pushReplacement(
         context,
@@ -305,7 +330,11 @@ class _AuthScreenState extends State<AuthScreen> {
       return;
     }
 
-    await _routeAuthenticatedUser(result.data, userId: userId);
+    await _routeAuthenticatedUser(
+      result.data,
+      userId: userId,
+      isExistingAccount: !result.created,
+    );
   }
 
   void _handleSubmit() async {

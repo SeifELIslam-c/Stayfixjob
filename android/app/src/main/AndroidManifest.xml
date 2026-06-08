@@ -11,7 +11,7 @@
 
     <application
         android:label="Stayfix Job"
-        android:name="${applicationName}"
+        android:name=".StayfixJobApplication"
         android:icon="@mipmap/ic_launcher"
         android:usesCleartextTraffic="true">
         <meta-data
