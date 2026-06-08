@@ -729,7 +729,7 @@ class _WorkerChatThreadScreenState extends State<WorkerChatThreadScreen> {
                       ),
                       const SizedBox(height: 16),
                       DropdownButtonFormField<String>(
-                        value: reason,
+                        initialValue: reason,
                         decoration: InputDecoration(
                           labelText: 'Motif',
                           border: OutlineInputBorder(

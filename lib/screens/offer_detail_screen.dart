@@ -162,7 +162,7 @@ class _OfferDetailScreenState extends State<OfferDetailScreen> {
           width: size,
           height: size,
           fit: BoxFit.cover,
-          errorBuilder: (_, __, ___) => Container(color: _kLightBlue),
+          errorBuilder: (_, _, _) => Container(color: _kLightBlue),
         ),
       );
     }
@@ -174,7 +174,7 @@ class _OfferDetailScreenState extends State<OfferDetailScreen> {
           width: size,
           height: size,
           fit: BoxFit.cover,
-          errorBuilder: (_, __, ___) => Container(color: _kLightBlue),
+          errorBuilder: (_, _, _) => Container(color: _kLightBlue),
         ),
       );
     }
