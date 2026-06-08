@@ -68,17 +68,9 @@ flutter:
   uses-material-design: true
   assets:
     - .env
-    - lib/assets/icon/stayfixjob.png
-    - lib/assets/icon/heroimg.png
-    - lib/assets/Office worker team work hello office waves.json
-    - lib/assets/conditionheroimg.png
-    - lib/assets/selectionheroimg.png
-    - lib/assets/homepageimghero.png
-    - lib/assets/monprofileimghero.png
-    - lib/assets/calendrierheroimg.png
-    - lib/assets/absenceheroimg.png
-    - lib/assets/horlageheroimg.png
-    - lib/assets/disponibiliteheroimg.png
-    - lib/assets/settingsheroimg.png
-    - lib/assets/stayfixjob_chat_background_dark_doodle.png
-    - lib/assets/interventfilterheroimg.webp
+    - lib/assets/
+    - lib/assets/icon/
+  fonts:
+    - family: Lucide
+      fonts:
+        - asset: packages/lucide_icons_flutter/assets/lucide.ttf

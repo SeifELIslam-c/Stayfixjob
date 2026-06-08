@@ -598,27 +598,6 @@ class _SettingsScreenState extends State<SettingsScreen> {
         .map((provider) => provider.providerId)
         .toSet();
 
-    if (providerIds.contains(EmailAuthProvider.PROVIDER_ID)) {
-      final password = await _promptCurrentPassword();
-      if (password == null) {
-        throw FirebaseAuthException(
-          code: 'user-cancelled',
-          message: 'Suppression annulee.',
-        );
-      }
-      final email = user.email?.trim() ?? _emailCtrl.text.trim();
-      if (email.isEmpty) {
-        throw FirebaseAuthException(
-          code: 'missing-email',
-          message: 'Adresse e-mail introuvable pour la reauthentification.',
-        );
-      }
-      await user.reauthenticateWithCredential(
-        EmailAuthProvider.credential(email: email, password: password),
-      );
-      return;
-    }
-
     if (providerIds.contains('google.com')) {
       final googleSignIn = GoogleSignIn(scopes: const ['email']);
       await googleSignIn.signOut();
@@ -643,6 +622,28 @@ class _SettingsScreenState extends State<SettingsScreen> {
         ..addScope('email')
         ..addScope('name');
       await user.reauthenticateWithProvider(provider);
+      return;
+    }
+
+    if (providerIds.contains(EmailAuthProvider.PROVIDER_ID)) {
+      final password = await _promptCurrentPassword();
+      if (password == null) {
+        throw FirebaseAuthException(
+          code: 'user-cancelled',
+          message: 'Suppression annulee.',
+        );
+      }
+      final email = user.email?.trim() ?? _emailCtrl.text.trim();
+      if (email.isEmpty) {
+        throw FirebaseAuthException(
+          code: 'missing-email',
+          message: 'Adresse e-mail introuvable pour la reauthentification.',
+        );
+      }
+      await user.reauthenticateWithCredential(
+        EmailAuthProvider.credential(email: email, password: password),
+      );
+      return;
     }
   }
 
@@ -1039,6 +1040,15 @@ class _SettingsScreenState extends State<SettingsScreen> {
     return result;
   }
 
+  Future<void> _deleteDocumentIfPresent(
+    DocumentReference<Map<String, dynamic>> reference,
+  ) async {
+    final snapshot = await reference.get();
+    if (snapshot.exists) {
+      await reference.delete();
+    }
+  }
+
   Future<void> _deleteDocsByField({
     required FirebaseFirestore firestore,
     required String collection,
@@ -1067,46 +1077,45 @@ class _SettingsScreenState extends State<SettingsScreen> {
   }) async {
     final firestore = FirebaseFirestore.instance;
 
-    await Future.wait([
-      firestore.collection('profiles').doc(uid).delete(),
-      firestore.collection('users').doc(uid).delete(),
-      _deleteDocsByField(
-        firestore: firestore,
-        collection: 'worker_offers',
-        field: 'workerId',
-        value: uid,
-      ),
-      _deleteDocsByField(
-        firestore: firestore,
-        collection: 'workers offers',
-        field: 'workerId',
-        value: uid,
-      ),
-      _deleteDocsByField(
-        firestore: firestore,
-        collection: 'offer_applications',
-        field: 'workerId',
-        value: uid,
-      ),
-      _deleteDocsByField(
-        firestore: firestore,
-        collection: 'stories',
-        field: 'ownerUid',
-        value: uid,
-      ),
-      _deleteDocsByField(
-        firestore: firestore,
-        collection: 'role_requests',
-        field: 'userId',
-        value: uid,
-      ),
-      _deleteDocsByField(
-        firestore: firestore,
-        collection: 'role_requests',
-        field: 'requesterId',
-        value: uid,
-      ),
-    ]);
+    await _deleteDocsByField(
+      firestore: firestore,
+      collection: 'worker_offers',
+      field: 'workerId',
+      value: uid,
+    );
+    await _deleteDocsByField(
+      firestore: firestore,
+      collection: 'workers offers',
+      field: 'workerId',
+      value: uid,
+    );
+    await _deleteDocsByField(
+      firestore: firestore,
+      collection: 'offer_applications',
+      field: 'workerId',
+      value: uid,
+    );
+    await _deleteDocsByField(
+      firestore: firestore,
+      collection: 'stories',
+      field: 'ownerUid',
+      value: uid,
+    );
+    await _deleteDocsByField(
+      firestore: firestore,
+      collection: 'role_requests',
+      field: 'userId',
+      value: uid,
+    );
+    await _deleteDocsByField(
+      firestore: firestore,
+      collection: 'role_requests',
+      field: 'requesterId',
+      value: uid,
+    );
+    await _deleteDocumentIfPresent(firestore.collection('workers').doc(uid));
+    await _deleteDocumentIfPresent(firestore.collection('profiles').doc(uid));
+    await _deleteDocumentIfPresent(firestore.collection('users').doc(uid));
 
     debugPrint(
       'Account deletion cleanup complete for uid=$uid, reason=$deletionReason',
@@ -1136,6 +1145,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
       final prefs = await SharedPreferences.getInstance();
       await prefs.remove('isLoggedIn');
       await prefs.remove('userId');
+      await GoogleSignIn().signOut().catchError((_) {});
       await FirebaseAuth.instance.signOut();
 
       if (!mounted) return;

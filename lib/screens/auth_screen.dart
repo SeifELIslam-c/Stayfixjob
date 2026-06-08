@@ -1,7 +1,6 @@
 // ignore_for_file: use_build_context_synchronously, curly_braces_in_flow_control_structures
 
 import 'dart:io';
-import 'dart:math';
 
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
@@ -51,13 +50,6 @@ class _AuthScreenState extends State<AuthScreen> {
   String _phoneComplete = '';
   String _phoneCountryIso = 'CA';
   String _phoneDialCode = '1';
-
-  String _generateGoogleFallbackPassword() {
-    const chars =
-        'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789!@#\$%^&*()-_=+';
-    final random = Random.secure();
-    return List.generate(24, (_) => chars[random.nextInt(chars.length)]).join();
-  }
 
   Widget _buildGoogleLogo({required bool compact}) {
     return SvgPicture.string(
@@ -316,32 +308,6 @@ class _AuthScreenState extends State<AuthScreen> {
     await _routeAuthenticatedUser(result.data, userId: userId);
   }
 
-  Future<void> _ensureGoogleAccountHasPassword(User user) async {
-    final email = user.email;
-    if (email == null || email.isEmpty) return;
-
-    final hasPasswordProvider = user.providerData.any(
-      (provider) => provider.providerId == EmailAuthProvider.PROVIDER_ID,
-    );
-    if (hasPasswordProvider) return;
-
-    final passwordCredential = EmailAuthProvider.credential(
-      email: email,
-      password: _generateGoogleFallbackPassword(),
-    );
-
-    try {
-      await user.linkWithCredential(passwordCredential);
-      await user.reload();
-    } on FirebaseAuthException catch (e) {
-      if (e.code != 'provider-already-linked' &&
-          e.code != 'email-already-in-use' &&
-          e.code != 'credential-already-in-use') {
-        rethrow;
-      }
-    }
-  }
-
   void _handleSubmit() async {
     if (_isRegisterMode && _nameController.text.trim().isEmpty) {
       ScaffoldMessenger.of(context).showSnackBar(
@@ -547,7 +513,6 @@ class _AuthScreenState extends State<AuthScreen> {
       final userCredential = await FirebaseAuth.instance.signInWithCredential(
         credential,
       );
-      await _ensureGoogleAccountHasPassword(userCredential.user!);
       await _completeAuthenticatedUser(
         userCredential,
         profileName: userCredential.user?.displayName ?? _defaultProfileName(),
