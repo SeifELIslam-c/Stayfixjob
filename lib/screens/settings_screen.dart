@@ -530,7 +530,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                     if (errorText != null) ...[
                       const SizedBox(height: 8),
                       Text(
-                        errorText,
+                        errorText!,
                         style: const TextStyle(
                           color: kSettingsRed,
                           fontSize: 12.5,

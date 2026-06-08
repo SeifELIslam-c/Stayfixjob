@@ -1,5 +1,5 @@
-name: hotel_lux_profile
-description: "A new Flutter project."
+name: stayfix_job
+description: "Stayfix Job helps candidates build profiles, manage availability, apply to opportunities, and communicate with the Stayfix team from one app."
 
 publish_to: 'none' 
 version: 1.0.0+10
@@ -60,6 +60,9 @@ flutter_launcher_icons:
   adaptive_icon_foreground: "lib/assets/icon/stayfixjob.png"
   image_path: "lib/assets/icon/stayfixjob.png" # تم استخدام المسار الذي أرسلته
   remove_alpha_ios: true
+
+dependency_overrides:
+  objective_c: ^9.4.1
 
 flutter:
   uses-material-design: true

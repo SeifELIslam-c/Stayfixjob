@@ -1,5 +1,5 @@
 import 'package:cloud_firestore/cloud_firestore.dart';
-import 'package:hotel_lux_profile/models/task_model.dart';
+import 'package:stayfix_job/models/task_model.dart';
 
 class TaskService {
   final _db = FirebaseFirestore.instance;
