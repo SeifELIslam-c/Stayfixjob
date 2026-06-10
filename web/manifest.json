@@ -1,6 +1,6 @@
 {
-    "name": "hotel_lux_profile",
-    "short_name": "hotel_lux_profile",
+    "name": "Stayfix Job",
+    "short_name": "Stayfix Job",
     "start_url": ".",
     "display": "standalone",
     "background_color": "#0175C2",

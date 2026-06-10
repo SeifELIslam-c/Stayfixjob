@@ -1,5 +1,5 @@
 name: stayfix_job
-description: "Stayfix Job helps candidates build profiles, manage availability, apply to opportunities, and communicate with the Stayfix team from one app."
+description: "Stayfix Job helps hospitality candidates build profiles, manage availability, apply to offers, and communicate with the Stayfix team from one app."
 
 publish_to: 'none' 
 version: 1.0.0+12
